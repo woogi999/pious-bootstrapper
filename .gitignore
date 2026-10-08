@@ -1,0 +1,9 @@
+/target
+/src-tauri/target
+/node_modules
+/dist
+/src-tauri/gen
+/release
+/installer/vendor
+/installer/gen
+/installer/target

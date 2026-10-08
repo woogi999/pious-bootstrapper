@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Application icon: the flat Pious mark on a dark tile. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1A1A1D"/><stop offset="1" stop-color="#0A0A0B"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.14"/></linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="9" y="9" width="238" height="238" rx="55" fill="none" stroke="url(#rim)" stroke-width="2"/>
+  <g transform="translate(46 46) scale(1.64)" fill="#EDEDEF">
+  <path d="M50.00 23.97 L27.46 63.01 L72.54 63.01Z M48.08 23.01 L12.24 28.20 L25.66 61.83Z M51.92 23.01 L74.34 61.83 L87.76 28.20Z M52.30 20.87 L87.58 26.19 L51.68 5.71Z M47.70 20.87 L48.32 5.71 L12.42 26.19Z M27.58 65.16 L50.00 93.60 L72.42 65.16Z M23.63 62.58 L10.59 29.36 L10.81 70.69Z M25.92 66.55 L12.49 73.60 L48.17 94.45Z M76.37 62.58 L89.19 70.69 L89.41 29.36Z M74.08 66.55 L51.83 94.45 L87.51 73.60Z"/>
+  </g>
+</svg>

@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pious Setup</title>
+    <style>
+      @font-face { font-family: Manrope; font-weight: 500; src: url("fonts/Manrope-Medium.ttf"); }
+      @font-face { font-family: Manrope; font-weight: 600; src: url("fonts/Manrope-SemiBold.ttf"); }
+      @font-face { font-family: Manrope; font-weight: 700; src: url("fonts/Manrope-Bold.ttf"); }
+      @font-face { font-family: Manrope; font-weight: 800; src: url("fonts/Manrope-ExtraBold.ttf"); }
+
+      :root {
+        --bg: 10 10 11;
+        --text: 237 237 239;
+        --muted: 160 160 168;
+        --faint: 110 110 118;
+        --surface: 255 255 255;
+        --accent: 242 242 243;
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+      body {
+        font-family: Manrope, system-ui, sans-serif;
+        font-size: 13px;
+        color: rgb(var(--text));
+        user-select: none;
+        -webkit-font-smoothing: antialiased;
+      }
+      .window {
+        position: relative;
+        height: 100%;
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        grid-template-rows: minmax(0, 1fr);
+        border-radius: 10px;
+        border: 1px solid rgb(var(--surface) / 0.08);
+        background:
+          radial-gradient(120% 90% at 0% 0%, rgb(var(--surface) / 0.07), transparent 60%),
+          rgb(var(--bg) / 0.72);
+        overflow: hidden;
+        opacity: 0;
+        transform: scale(0.985);
+        animation: open 520ms var(--ease) 60ms forwards;
+      }
+      @keyframes open { to { opacity: 1; transform: none; } }
+      .bar {
+        position: absolute;
+        inset: 0 0 auto 0;
+        height: 40px;
+        display: flex;
+        justify-content: flex-end;
+        z-index: 5;
+      }
+      .bar button {
+        width: 44px;
+        border: none;
+        background: none;
+        color: rgb(var(--muted));
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        transition: background 140ms, color 140ms;
+      }
+      .bar button:hover { background: rgb(var(--surface) / 0.08); color: rgb(var(--text)); }
+      .bar button.close:hover { background: #c42b1c; color: white; }
+
+      /* The mark */
+      .side {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 26px 28px 24px;
+        border-right: 1px solid rgb(var(--surface) / 0.06);
+      }
+      .lockup { display: flex; align-items: center; gap: 10px; }
+      .lockup svg { width: 22px; height: 22px; color: rgb(var(--text)); }
+      .lockup span { font-weight: 800; font-size: 17px; letter-spacing: 0.04em; }
+      .stage { display: grid; place-items: center; flex: 1; }
+      canvas { width: 196px; height: 196px; filter: drop-shadow(0 22px 44px rgb(0 0 0 / 0.5)); }
+      .version { color: rgb(var(--faint)); font-weight: 600; font-size: 11.5px; }
+
+      /* The steps */
+      .main { position: relative; padding: 64px 40px 28px 36px; display: flex; flex-direction: column; min-height: 0; }
+      .step { display: none; flex-direction: column; gap: 14px; height: 100%; min-height: 0; }
+      .step.on { display: flex; }
+      .step.on > * { animation: rise 420ms var(--ease) both; }
+      .step.on > *:nth-child(2) { animation-delay: 40ms; }
+      .step.on > *:nth-child(3) { animation-delay: 80ms; }
+      .step.on > *:nth-child(4) { animation-delay: 120ms; }
+      .step.on > *:nth-child(5) { animation-delay: 160ms; }
+      .step.on > *:nth-child(6) { animation-delay: 200ms; }
+      @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+      h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.01em; }
+      p { margin: 0; color: rgb(var(--muted)); line-height: 1.5; font-weight: 500; }
+      .label { font-weight: 700; font-size: 11.5px; color: rgb(var(--faint)); text-transform: uppercase; letter-spacing: 0.08em; }
+      .field { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+      .path { display: flex; gap: 8px; }
+      .input {
+        flex: 1;
+        min-width: 0;
+        height: 36px;
+        padding: 0 12px;
+        display: flex;
+        align-items: center;
+        border-radius: 8px;
+        background: rgb(var(--surface) / 0.05);
+        border: 1px solid rgb(var(--surface) / 0.09);
+        font-weight: 600;
+        font-size: 12.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .btn {
+        height: 36px;
+        padding: 0 16px;
+        border-radius: 8px;
+        border: 1px solid rgb(var(--surface) / 0.1);
+        background: rgb(var(--surface) / 0.06);
+        color: rgb(var(--text));
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        transition: background 160ms, transform 160ms var(--ease), opacity 160ms;
+      }
+      .btn:hover { background: rgb(var(--surface) / 0.1); }
+      .btn:active { transform: scale(0.97); }
+      .btn.primary { background: rgb(var(--accent)); color: rgb(var(--bg)); border-color: transparent; min-width: 150px; height: 42px; font-size: 14px; }
+      .btn.primary:hover { background: white; }
+      .btn.danger { background: #e5484d; color: white; border-color: transparent; }
+      .btn:disabled { opacity: 0.45; pointer-events: none; }
+      .check { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; width: fit-content; }
+      .check input { display: none; }
+      .box {
+        width: 18px; height: 18px; border-radius: 5px;
+        border: 1.5px solid rgb(var(--surface) / 0.25);
+        display: grid; place-items: center;
+        transition: background 160ms, border-color 160ms;
+      }
+      .box svg { width: 12px; height: 12px; color: rgb(var(--bg)); opacity: 0; transform: scale(0.6); transition: opacity 160ms, transform 200ms var(--ease); }
+      .check input:checked + .box { background: rgb(var(--accent)); border-color: rgb(var(--accent)); }
+      .check input:checked + .box svg { opacity: 1; transform: none; }
+      .spacer { flex: 1; }
+      .actions { display: flex; align-items: center; gap: 12px; }
+      .note { color: rgb(var(--faint)); font-weight: 600; font-size: 12px; }
+      .warn { color: #f5a524; font-weight: 600; font-size: 12px; }
+      .error { color: #ff6b6b; font-weight: 600; }
+      .progress { height: 6px; border-radius: 3px; background: rgb(var(--surface) / 0.08); overflow: hidden; }
+      .progress div {
+        height: 100%;
+        width: 0%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, rgb(var(--accent) / 0.75), rgb(var(--accent)));
+        transition: width 220ms var(--ease);
+        position: relative;
+        overflow: hidden;
+      }
+      .progress div::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.6), transparent);
+        animation: sheen 1.3s linear infinite;
+      }
+      @keyframes sheen { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+      .notes {
+        flex: 1;
+        min-height: 84px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .notes ul {
+        flex: 1 1 0;
+        min-height: 0;
+        margin: 0;
+        padding: 10px 14px 10px 28px;
+        border-radius: 10px;
+        background: rgb(var(--surface) / 0.04);
+        border: 1px solid rgb(var(--surface) / 0.07);
+        overflow-y: auto;
+        color: rgb(var(--muted));
+        font-weight: 500;
+        font-size: 12px;
+        line-height: 1.5;
+        -webkit-mask-image: linear-gradient(to bottom, black 80%, transparent);
+        mask-image: linear-gradient(to bottom, black 80%, transparent);
+      }
+      .notes[hidden] { display: none; }
+      .notes li { margin: 0 0 4px; }
+      .notes li::marker { color: rgb(var(--faint)); }
+      .notes ul::-webkit-scrollbar { width: 6px; }
+      .notes ul::-webkit-scrollbar-thumb { background: rgb(var(--surface) / 0.15); border-radius: 3px; }
+      .stage-text { font-weight: 600; color: rgb(var(--muted)); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    </style>
+  </head>
+  <body>
+    <div class="window">
+      <div class="bar" data-tauri-drag-region>
+        <button id="min" aria-label="Minimize"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.3"/></svg></button>
+        <button id="close" class="close" aria-label="Close"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.3"/></svg></button>
+      </div>
+      <aside class="side" data-tauri-drag-region>
+        <div class="lockup" data-tauri-drag-region>
+          <svg viewBox="0 0 100 100" fill="currentColor" aria-hidden="true"><path d="M50.00 23.97 L27.46 63.01 L72.54 63.01Z M48.08 23.01 L12.24 28.20 L25.66 61.83Z M51.92 23.01 L74.34 61.83 L87.76 28.20Z M52.30 20.87 L87.58 26.19 L51.68 5.71Z M47.70 20.87 L48.32 5.71 L12.42 26.19Z M27.58 65.16 L50.00 93.60 L72.42 65.16Z M23.63 62.58 L10.59 29.36 L10.81 70.69Z M25.92 66.55 L12.49 73.60 L48.17 94.45Z M76.37 62.58 L89.19 70.69 L89.41 29.36Z M74.08 66.55 L51.83 94.45 L87.51 73.60Z"/></svg>
+          <span>Pious</span>
+        </div>
+        <div class="stage" data-tauri-drag-region><canvas id="mark" width="392" height="392"></canvas></div>
+        <span class="version" id="version"></span>
+      </aside>
+
+      <main class="main">
+        <!-- Install -->
+        <section class="step" id="step-install">
+          <h1 id="install-title">Install Pious</h1>
+          <p id="install-body">Your Roblox games, accounts, servers, friends and recordings, all in one place.</p>
+          <div class="field">
+            <span class="label">Install to</span>
+            <div class="path"><div class="input" id="dir"></div><button class="btn" id="change">Change</button></div>
+          </div>
+          <label class="check"><input type="checkbox" id="desktop" checked /><span class="box"><svg viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Add a desktop shortcut</label>
+          <label class="check"><input type="checkbox" id="open" checked /><span class="box"><svg viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Open Pious when it's done</label>
+          <div class="notes" id="notes" hidden><span class="label" id="notes-title">What's new</span><ul id="notes-list"></ul></div>
+          <span class="spacer" id="notes-spacer"></span>
+          <div class="actions">
+            <button class="btn primary" id="install">Install</button>
+            <span class="note" id="size"></span>
+          </div>
+          <span class="warn" id="elsewhere" hidden>Another copy of Pious is open. Close it before opening the new one.</span>
+          <span class="error" id="install-error"></span>
+        </section>
+
+        <!-- Working -->
+        <section class="step" id="step-working">
+          <h1 id="working-title">Installing Pious</h1>
+          <p id="working-body">This takes a few seconds.</p>
+          <span class="spacer"></span>
+          <div class="progress"><div id="bar"></div></div>
+          <span class="stage-text" id="stage">Starting</span>
+        </section>
+
+        <!-- Done -->
+        <section class="step" id="step-done">
+          <h1 id="done-title">Pious is ready</h1>
+          <p id="done-body">Find it in the Start menu any time. It keeps itself up to date.</p>
+          <span class="spacer"></span>
+          <div class="actions">
+            <button class="btn primary" id="launch">Open Pious</button>
+            <button class="btn" id="finish">Close</button>
+          </div>
+        </section>
+
+        <!-- Uninstall -->
+        <section class="step" id="step-uninstall">
+          <h1>Uninstall Pious</h1>
+          <p>Pious and its shortcuts are removed from this PC. Roblox stays installed.</p>
+          <label class="check"><input type="checkbox" id="data" /><span class="box"><svg viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Also delete my library, settings, recordings list and the Roblox versions Pious installed</label>
+          <span class="spacer"></span>
+          <div class="actions">
+            <button class="btn danger" id="remove">Uninstall</button>
+            <button class="btn" id="keep">Keep Pious</button>
+          </div>
+          <span class="error" id="uninstall-error"></span>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+      const win = window.__TAURI__.window.getCurrentWindow();
+      const $ = (id) => document.getElementById(id);
+
+      // ── The spinning mark (the logo's own geometry) ─────────────────────
+      const V = [[0,1.154701,1.511523],[-1,-0.57735,1.511523],[1,-0.57735,1.511523],[-1.618034,-0.934172,-0.356822],[1.618034,-0.934172,-0.356822],[0,1.868345,-0.356822],[1.618034,0.934172,0.356822],[-1.618034,0.934172,0.356822],[0,-1.868345,0.356822],[0,-1.154701,-1.511523],[1,0.57735,-1.511523],[-1,0.57735,-1.511523]];
+      const F = [[0,1,2],[0,7,1],[0,2,6],[0,6,5],[0,5,7],[1,8,2],[1,7,3],[1,3,8],[2,4,6],[2,8,4],[3,7,11],[3,9,8],[3,11,9],[4,10,6],[4,8,9],[4,9,10],[5,6,10],[5,11,7],[5,10,11],[9,11,10]];
+      const L = [-0.375652742008357, 0.5426095162342934, 0.751305484016714];
+      const canvas = $("mark");
+      const ctx = canvas.getContext("2d");
+      const S = 392;
+      let speed = 0.35;      // turns per second, eased toward `target`
+      let target = 0.35;
+      let flat = 0;          // 0 = holographic and turning, 1 = the flat mark
+      let flatTarget = 0;
+      let angle = 0;
+      let last = performance.now();
+      const rot = (v, yaw, pitch) => {
+        let [x, y, z] = v;
+        let c = Math.cos(yaw), s = Math.sin(yaw);
+        [x, z] = [x * c + z * s, -x * s + z * c];
+        c = Math.cos(pitch); s = Math.sin(pitch);
+        [y, z] = [y * c - z * s, y * s + z * c];
+        return [x, y, z];
+      };
+      function draw(now) {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        speed += (target - speed) * Math.min(1, dt * 3);
+        flat += (flatTarget - flat) * Math.min(1, dt * 4);
+        // Settle into the logo's pose as it flattens.
+        angle += speed * dt * Math.PI * 2 * (1 - flat);
+        const wrapped = ((angle + Math.PI) % (Math.PI * 2)) - Math.PI;
+        const yaw = wrapped * (1 - flat);
+        const pitch = Math.sin(angle * 0.5) * 0.35 * (1 - flat);
+        const unit = (S / 100) * 24.62 * (1 + 0.03 * Math.sin(Math.PI * flat));
+        const gap = ((1.2 + 1.2 * flat) * S) / 100;
+        const a = now / 1000 * 1.4;
+        const holo = ctx.createLinearGradient(S / 2 - Math.cos(a) * S * 0.75, S / 2 - Math.sin(a) * S * 0.75, S / 2 + Math.cos(a) * S * 0.75, S / 2 + Math.sin(a) * S * 0.75);
+        ["#ff9ad5", "#a99bff", "#7fe3ff", "#b6ffcf", "#ffe6a3", "#ff9ad5"].forEach((c, i, all) => holo.addColorStop(i / (all.length - 1), c));
+        const verts = V.map((v) => rot(v, yaw, pitch));
+        const faces = F.map(([i, j, k]) => {
+          const [p, q, r] = [verts[i], verts[j], verts[k]];
+          const u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]], w = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+          let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+          const l = Math.hypot(...n) || 1;
+          n = n.map((x) => x / l);
+          return { p, q, r, n, depth: (p[2] + q[2] + r[2]) / 3 };
+        }).filter((f) => f.n[2] > 0.0001).sort((x, y) => x.depth - y.depth);
+        ctx.clearRect(0, 0, S, S);
+        for (const f of faces) {
+          let pts = [f.p, f.q, f.r].map((v) => [S / 2 + v[0] * unit, S / 2 - v[1] * unit]);
+          const cx = (pts[0][0] + pts[1][0] + pts[2][0]) / 3, cy = (pts[0][1] + pts[1][1] + pts[2][1]) / 3;
+          pts = pts.map(([x, y]) => { const dx = cx - x, dy = cy - y, l = Math.hypot(dx, dy) || 1; return [x + (dx / l) * gap, y + (dy / l) * gap]; });
+          const lit = Math.max(0, f.n[0] * L[0] + f.n[1] * L[1] + f.n[2] * L[2]);
+          const shade = 255 * (0.5 + 0.5 * lit);
+          const mix = (t) => Math.round(shade + (t - shade) * flat);
+          const path = new Path2D();
+          path.moveTo(...pts[0]); path.lineTo(...pts[1]); path.lineTo(...pts[2]); path.closePath();
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = `rgb(${mix(237)},${mix(237)},${mix(239)})`;
+          ctx.fill(path);
+          if (flat < 0.99) {
+            ctx.globalCompositeOperation = "multiply";
+            ctx.globalAlpha = (1 - flat) * (0.14 + 0.18 * (1 - lit));
+            ctx.fillStyle = holo;
+            ctx.fill(path);
+            ctx.globalCompositeOperation = "source-over";
+          }
+        }
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+
+      // ── Steps ───────────────────────────────────────────────────────────
+      const show = (name) => document.querySelectorAll(".step").forEach((s) => s.classList.toggle("on", s.id === `step-${name}`));
+      const mb = (n) => (n / 1048576).toFixed(0) + " MB";
+      let info;
+      let dir;
+
+      listen("progress", ({ payload }) => {
+        const share = payload.total ? payload.done / payload.total : 0;
+        $("bar").style.width = `${Math.max(3, share * 100)}%`;
+        $("stage").textContent = payload.stage + (payload.total > 10 ? ` · ${Math.round(share * 100)}%` : "");
+      });
+
+      async function start() {
+        info = await invoke("info");
+        dir = info.dir;
+        $("version").textContent = `Version ${info.version}`;
+        $("dir").textContent = dir;
+        $("dir").title = dir;
+        $("size").textContent = `${mb(info.size)} on disk`;
+        $("elsewhere").hidden = !info.elsewhere;
+        if (info.existing) {
+          $("install-title").textContent = info.existing_version === info.version ? "Reinstall Pious" : "Update Pious";
+          $("install-body").textContent = info.existing_version
+            ? `Pious ${info.existing_version} is installed. Your library and settings stay as they are.`
+            : "Pious is already installed. Your library and settings stay as they are.";
+          $("install").textContent = info.existing_version === info.version ? "Reinstall" : "Update";
+        }
+        // Warnings get the room instead.
+        if (info.notes && info.notes.length && !info.empty && !info.elsewhere) {
+          $("notes").hidden = false;
+          $("notes-spacer").hidden = true;
+          $("notes-title").textContent = `What's new in ${info.version}`;
+          for (const note of info.notes) {
+            const li = document.createElement("li");
+            li.textContent = note;
+            $("notes-list").appendChild(li);
+          }
+        }
+        if (info.empty) {
+          $("install").disabled = true;
+          $("install-error").textContent = "This installer was built without Pious inside it.";
+        }
+        if (info.mode === "uninstall") show("uninstall");
+        else if (info.mode === "update") runUpdate();
+        else show("install");
+        await win.show();
+      }
+
+      async function runInstall() {
+        $("working-title").textContent = info.existing ? "Updating Pious" : "Installing Pious";
+        show("working");
+        target = 1.2;
+        try {
+          await invoke("install", { dir, desktop: $("desktop").checked });
+          target = 0.2;
+          flatTarget = 1;
+          if ($("open").checked) {
+            await invoke("open_pious", { dir }).catch(() => {});
+            $("launch").hidden = true;
+            $("done-body").textContent = "Pious is opening. Find it in the Start menu any time; it keeps itself up to date.";
+          }
+          show("done");
+        } catch (e) {
+          target = 0.35;
+          show("install");
+          $("install-error").textContent = String(e);
+        }
+      }
+
+      async function runUpdate() {
+        $("working-title").textContent = `Updating Pious to ${info.version}`;
+        $("working-body").textContent = "Pious opens again when it's done.";
+        show("working");
+        target = 1.2;
+        try {
+          await invoke("update");
+          flatTarget = 1;
+          $("stage").textContent = "Opening Pious";
+          setTimeout(() => invoke("quit"), 700);
+        } catch (e) {
+          $("working-title").textContent = "The update didn't finish";
+          $("working-body").textContent = String(e);
+          target = 0.2;
+        }
+      }
+
+      $("change").onclick = async () => {
+        const picked = await invoke("pick_dir", { current: dir });
+        if (picked) {
+          dir = picked;
+          $("dir").textContent = dir;
+          $("dir").title = dir;
+        }
+      };
+      $("install").onclick = runInstall;
+      $("launch").onclick = async () => {
+        await invoke("open_pious", { dir }).catch((e) => ($("done-body").textContent = String(e)));
+        invoke("quit");
+      };
+      $("finish").onclick = () => invoke("quit");
+      $("keep").onclick = () => invoke("quit");
+      $("remove").onclick = async () => {
+        $("working-title").textContent = "Uninstalling Pious";
+        $("working-body").textContent = "Removing Pious from this PC.";
+        show("working");
+        target = 1.2;
+        try {
+          await invoke("uninstall", { removeData: $("data").checked });
+          flatTarget = 1;
+          target = 0.2;
+          $("done-title").textContent = "Pious was removed";
+          $("done-body").textContent = "Thanks for playing with Pious.";
+          $("launch").hidden = true;
+          show("done");
+        } catch (e) {
+          show("uninstall");
+          $("uninstall-error").textContent = String(e);
+        }
+      };
+      $("min").onclick = () => win.minimize();
+      $("close").onclick = () => invoke("quit");
+      document.addEventListener("contextmenu", (e) => e.preventDefault());
+      start();
+    </script>
+  </body>
+</html>

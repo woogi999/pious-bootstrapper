@@ -1,0 +1,81 @@
+[package]
+name = "pious"
+version = "1.0.0"
+edition = "2024"
+description = "Pious — your Roblox games, accounts, private servers, versions, friends and recordings in one place."
+license = "MIT"
+
+[[bin]]
+name = "pious"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tokio = { version = "1", features = ["fs", "time", "rt-multi-thread", "macros", "io-util", "sync", "net", "io-std"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+open = "5"
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+md5 = "0.7"
+rand = "0.8"
+rfd = "0.17"
+tauri-plugin-global-shortcut = "2"
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico", "bmp"] }
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.25"
+window-vibrancy = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security_Cryptography",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_Xps",
+] }
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Foundation", "Foundation", "Media_Control", "Storage_Streams"] }
+windows-future = "0.3"
+webview2-com = "0.39"
+
+# Development builds: no debug info for dependencies and only line tables
+# for Pious itself, which keeps incremental rebuilds and linking quick.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
+
+[profile.dev.build-override]
+opt-level = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+strip = true
+incremental = false

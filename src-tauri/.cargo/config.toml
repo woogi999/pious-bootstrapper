@@ -1,0 +1,3 @@
+# Faster builds: LLVM's linker instead of link.exe.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

@@ -1,0 +1,471 @@
+/* The Pious design system: monochrome glass on a dark backdrop. Colors come
+   from CSS variables set by lib/theme.ts from the user's appearance.
+   `--glass(a)` is spelled out as rgb(var(--surface) / calc(a * var(--glass))). */
+
+@font-face { font-family: Manrope; font-weight: 400; src: url("../assets/fonts/Manrope-Regular.ttf"); font-display: block; }
+@font-face { font-family: Manrope; font-weight: 500; src: url("../assets/fonts/Manrope-Medium.ttf"); font-display: block; }
+@font-face { font-family: Manrope; font-weight: 600; src: url("../assets/fonts/Manrope-SemiBold.ttf"); font-display: block; }
+@font-face { font-family: Manrope; font-weight: 700; src: url("../assets/fonts/Manrope-Bold.ttf"); font-display: block; }
+@font-face { font-family: Manrope; font-weight: 800; src: url("../assets/fonts/Manrope-ExtraBold.ttf"); font-display: block; }
+
+:root {
+  --bg: 10 10 11;
+  --surface: 255 255 255;
+  --text: 237 237 239;
+  --muted: 160 160 162;
+  --faint: 118 118 121;
+  --accent: 242 242 243;
+  --accent-hover: 249 249 250;
+  --accent-pressed: 200 200 201;
+  --accent-ink: 11 11 12;
+  --panel: 26 26 27;
+  --rim: 245 245 246;
+  --glass: 1;
+  --window-alpha: 1;
+
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --fast: 140ms;
+  --med: 220ms;
+
+  font-family: Manrope, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgb(var(--text));
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; user-select: none; }
+#app { height: 100%; }
+button { font: inherit; color: inherit; }
+img { -webkit-user-drag: none; }
+input, textarea { user-select: text; }
+.selectable { user-select: text; }
+
+/* Reduced motion turns every transition and animation off. */
+.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* ── Type ──────────────────────────────────────────────────────────────── */
+
+.display { font-weight: 800; font-size: 28px; line-height: 1.1; margin: 0; }
+.page-title { font-weight: 600; font-size: 21px; line-height: 1.2; margin: 0; }
+.section-title { font-weight: 600; font-size: 15px; margin: 0; }
+.item-title { font-weight: 500; font-size: 13.5px; }
+.meta { font-size: 12px; color: rgb(var(--muted)); }
+.secondary { font-size: 12px; color: rgb(var(--faint)); }
+.label { font-weight: 600; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; color: rgb(var(--faint)); }
+.line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.grow { flex: 1; min-width: 0; }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.spacer { flex: 1; }
+
+/* ── Surfaces ──────────────────────────────────────────────────────────── */
+
+.glass-base {
+  background: linear-gradient(rgb(var(--surface) / calc(0.022 * var(--glass))), rgb(var(--surface) / calc(0.012 * var(--glass))));
+  border: 1px solid rgb(var(--surface) / calc(0.045 * var(--glass)));
+  border-radius: var(--r-lg);
+}
+.glass {
+  background: linear-gradient(rgb(var(--surface) / calc(0.052 * var(--glass))), rgb(var(--surface) / calc(0.028 * var(--glass))));
+  border: 1px solid rgb(var(--surface) / calc(0.07 * var(--glass)));
+  border-radius: var(--r-lg);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.24), inset 0 1px 0 rgb(255 255 255 / calc(0.05 * var(--glass)));
+}
+.glass-elevated {
+  background: linear-gradient(rgb(var(--surface) / calc(0.078 * var(--glass))), rgb(var(--surface) / calc(0.042 * var(--glass))));
+  border: 1px solid rgb(var(--surface) / calc(0.095 * var(--glass)));
+  border-radius: var(--r-lg);
+  box-shadow: 0 9px 26px rgb(0 0 0 / 0.34), inset 0 1px 0 rgb(255 255 255 / calc(0.07 * var(--glass)));
+}
+.panel {
+  background: rgb(var(--panel) / 0.97);
+  border: 1px solid rgb(var(--surface) / calc(0.11 * var(--glass)));
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+
+/* ── Light on glass ────────────────────────────────────────────────────
+   Every glass surface catches light on its rim: a resting glint at the
+   top-left and bottom-right corners, and, on hover, a shine that follows
+   the cursor along the edges with a soft glow inside. Both are pseudo-
+   elements (the rim one masked to a 1.5px border), so they cost no
+   layout. The cursor position arrives as --mx/--my from lib/shine.ts. */
+
+@property --shine {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+.glass, .glass-elevated, .panel, .lit, .card, .btn, .chip, .shine {
+  position: relative;
+  --rest: 1;
+}
+.btn, .chip { --rest: 0; }
+
+.glass::after, .glass-elevated::after, .panel::after, .lit::after,
+.card::after, .btn::after, .chip::after, .shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  pointer-events: none;
+  z-index: 2;
+  background:
+    radial-gradient(220px circle at var(--mx, -999px) var(--my, -999px), rgb(var(--rim) / calc(0.8 * var(--shine))), transparent 70%),
+    radial-gradient(circle at 0 0, rgb(var(--rim) / calc(0.3 * var(--glass) * var(--rest) * (1 - 0.5 * var(--shine)))), transparent 150px),
+    radial-gradient(circle at 100% 100%, rgb(var(--rim) / calc(0.17 * var(--glass) * var(--rest) * (1 - 0.5 * var(--shine)))), transparent 130px),
+    rgb(var(--rim) / calc(0.035 * var(--glass) * var(--rest) + 0.1 * var(--shine)));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  transition: --shine 550ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* Light across the surface: a spotlight under the cursor, an overall lift
+   in brightness, and (on cards) a glossy sheen that slides with the
+   cursor, like light moving over glass. */
+.card::before, .btn::before, .chip::before, .shine::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    radial-gradient(380px circle at var(--mx, -999px) var(--my, -999px), rgb(var(--rim) / calc(0.13 * var(--shine))), transparent 65%),
+    linear-gradient(rgb(var(--rim) / calc(0.035 * var(--shine))), rgb(var(--rim) / calc(0.035 * var(--shine))));
+  transition: --shine 550ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.card::before {
+  background:
+    linear-gradient(
+      115deg,
+      transparent calc(var(--sx, 50%) - 22%),
+      rgb(var(--rim) / calc(0.09 * var(--shine))) var(--sx, 50%),
+      transparent calc(var(--sx, 50%) + 22%)
+    ),
+    radial-gradient(420px circle at var(--mx, -999px) var(--my, -999px), rgb(var(--rim) / calc(0.14 * var(--shine))), transparent 65%),
+    linear-gradient(rgb(var(--rim) / calc(0.04 * var(--shine))), rgb(var(--rim) / calc(0.04 * var(--shine))));
+}
+
+.card:hover::after, .card:hover::before, .shine:hover::after, .shine:hover::before { --shine: 1; }
+.btn:hover:not(:disabled)::after, .btn:hover:not(:disabled)::before,
+.chip:hover::after, .chip:hover::before { --shine: 0.75; }
+
+/* Cards lift and brighten on hover. Only transform/opacity/box-shadow
+   animate, which the compositor handles without relayout. */
+.card {
+  position: relative;
+  overflow: hidden;
+  text-align: left;
+  cursor: pointer;
+  --lift: 0px;
+  --grow: 1;
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(var(--lift)) scale(var(--grow));
+  transition:
+    transform 450ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 450ms var(--ease),
+    border-color var(--med) var(--ease),
+    background 450ms var(--ease);
+}
+/* Only a hovered card gets its own compositor layer. */
+.card:hover { will-change: transform; }
+.card:hover {
+  --lift: -4px;
+  --grow: 1.015;
+  border-color: rgb(var(--surface) / calc(0.17 * var(--glass)));
+  box-shadow: 0 14px 34px rgb(0 0 0 / 0.48), inset 0 1px 0 rgb(255 255 255 / calc(0.08 * var(--glass)));
+}
+.glass.card:hover {
+  background: linear-gradient(rgb(var(--surface) / calc(0.097 * var(--glass))), rgb(var(--surface) / calc(0.053 * var(--glass))));
+}
+.glass-base.card:hover {
+  background: linear-gradient(rgb(var(--surface) / calc(0.06 * var(--glass))), rgb(var(--surface) / calc(0.035 * var(--glass))));
+}
+.card:active { --lift: -1px; --grow: 1.005; }
+.card.active { border-color: rgb(var(--accent) / 0.5); }
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  border: 1px solid rgb(var(--surface) / calc(0.09 * var(--glass)));
+  background: rgb(var(--surface) / calc(0.06 * var(--glass)));
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), transform var(--fast) var(--ease), opacity var(--fast);
+}
+.btn:hover { background: rgb(var(--surface) / calc(0.1 * var(--glass))); border-color: rgb(var(--surface) / calc(0.15 * var(--glass))); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; pointer-events: none; }
+.btn :global(svg), .btn svg { width: 14px; height: 14px; flex: none; }
+.btn.primary {
+  background: linear-gradient(rgb(var(--accent)), rgb(var(--accent-pressed)));
+  color: rgb(var(--accent-ink));
+  border-color: rgb(255 255 255 / 0.18);
+}
+.btn.primary:hover {
+  background: linear-gradient(rgb(var(--accent-hover)), rgb(var(--accent)));
+  border-color: rgb(255 255 255 / 0.32);
+  box-shadow: 0 4px 18px rgb(var(--accent) / 0.28);
+}
+.btn.primary:active { background: rgb(var(--accent-pressed)); box-shadow: none; }
+.btn.tertiary { background: transparent; border-color: transparent; color: rgb(var(--muted)); padding: 0 9px; }
+.btn.tertiary:hover { background: rgb(var(--surface) / calc(0.06 * var(--glass))); color: rgb(var(--text)); }
+.btn.danger:hover { background: rgb(var(--text) / 0.14); }
+.btn.hero { height: 36px; padding: 0 22px; font-size: 14px; border-radius: var(--r-md); }
+.btn.hero svg { width: 15px; height: 15px; }
+.btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: var(--r-sm);
+  border: none;
+  background: transparent;
+  color: rgb(var(--muted));
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), color var(--fast);
+}
+.icon-btn:hover { background: rgb(var(--surface) / calc(0.08 * var(--glass))); color: rgb(var(--text)); }
+.icon-btn.on { color: rgb(var(--text)); }
+.icon-btn svg { width: 15px; height: 15px; }
+
+/* Round buttons that float over artwork. */
+.overlay-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(0 0 0 / 0.58);
+  color: rgb(255 255 255 / 0.78);
+  cursor: pointer;
+  transition: background var(--fast), color var(--fast), transform var(--fast);
+}
+.overlay-btn:hover { background: rgb(0 0 0 / 0.6); color: white; }
+.overlay-btn.on { color: white; background: rgb(255 255 255 / 0.18); }
+.overlay-btn svg { width: 13px; height: 13px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgb(var(--surface) / calc(0.07 * var(--glass)));
+  background: rgb(var(--surface) / calc(0.035 * var(--glass)));
+  color: rgb(var(--muted));
+  font-weight: 500;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--fast), color var(--fast), border-color var(--fast);
+}
+.chip:hover { background: rgb(var(--surface) / calc(0.07 * var(--glass))); color: rgb(var(--text)); }
+.chip.on { background: rgb(var(--accent)); color: rgb(var(--accent-ink)); border-color: transparent; }
+.chip svg { width: 11px; height: 11px; }
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-weight: 500;
+  font-size: 12px;
+  color: rgb(var(--muted));
+  cursor: pointer;
+}
+.link:hover { color: rgb(var(--text)); }
+.link svg { width: 11px; height: 11px; }
+
+/* ── Badges & notices ──────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgb(var(--muted) / 0.12);
+  border: 1px solid rgb(var(--muted) / 0.16);
+  color: rgb(var(--muted));
+  font-weight: 500;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.badge svg { width: 11px; height: 11px; flex: none; }
+.badge.strong { color: rgb(var(--text)); background: rgb(var(--text) / 0.1); border-color: rgb(var(--text) / 0.16); }
+.badge.accent { color: rgb(var(--accent)); background: rgb(var(--accent) / 0.12); border-color: rgb(var(--accent) / 0.2); }
+
+.art-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.62);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  color: rgb(255 255 255 / 0.9);
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.art-chip svg { width: 11px; height: 11px; }
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  background: rgb(var(--muted) / 0.1);
+  border: 1px solid rgb(var(--muted) / 0.15);
+  font-size: 12.5px;
+}
+.notice svg { width: 15px; height: 15px; flex: none; color: rgb(var(--muted)); }
+.notice.caution svg, .notice.negative svg { color: rgb(var(--text)); }
+
+.tile-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--r-md);
+  color: rgb(var(--accent));
+  background: rgb(var(--accent) / 0.12);
+  border: 1px solid rgb(var(--accent) / 0.18);
+}
+.tile-icon svg { width: 55%; height: 55%; }
+
+.divider { height: 1px; background: rgb(var(--surface) / calc(0.07 * var(--glass))); border: none; margin: 0; flex: none; }
+
+/* ── Forms ─────────────────────────────────────────────────────────────── */
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.input {
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  border: 1px solid rgb(var(--surface) / calc(0.095 * var(--glass)));
+  background: rgb(var(--surface) / calc(0.045 * var(--glass)));
+  color: rgb(var(--text));
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--fast), background var(--fast), box-shadow var(--med);
+}
+.input::placeholder { color: rgb(var(--faint)); }
+.input:hover { background: rgb(var(--surface) / calc(0.06 * var(--glass))); }
+.input:focus { border-color: rgb(var(--accent) / 0.65); box-shadow: 0 0 0 3px rgb(var(--accent) / 0.12); }
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+}
+.search-box svg { width: 14px; height: 14px; color: rgb(var(--faint)); flex: none; }
+.search-box input { flex: 1; min-width: 0; border: none; background: none; outline: none; color: inherit; font: inherit; font-size: 13px; }
+.search-box input::placeholder { color: rgb(var(--faint)); }
+
+input[type="range"] { accent-color: rgb(var(--accent)); width: 200px; }
+/* Typed numbers without the spinner arrows. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: rgb(var(--faint) / 0.14);
+  color: rgb(var(--faint));
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.progress { height: 5px; border-radius: 99px; background: rgb(var(--surface) / calc(0.08 * var(--glass))); overflow: hidden; }
+.progress > div { height: 100%; background: rgb(var(--accent)); border-radius: inherit; transition: width 300ms var(--ease); }
+
+/* ── Layout helpers ────────────────────────────────────────────────────── */
+
+.page { display: flex; flex-direction: column; gap: 22px; }
+.section { display: flex; flex-direction: column; gap: 10px; }
+.section-header { display: flex; align-items: flex-end; gap: 10px; }
+.page-header { display: flex; align-items: center; gap: 8px; }
+
+/* Cards wrap in rows and cascade in when a list (re)appears. */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card, 216px), 1fr)); gap: 12px; }
+.grid > * { animation: rise 300ms var(--ease) both; }
+.grid > *:nth-child(2) { animation-delay: 25ms; }
+.grid > *:nth-child(3) { animation-delay: 50ms; }
+.grid > *:nth-child(4) { animation-delay: 75ms; }
+.grid > *:nth-child(5) { animation-delay: 100ms; }
+.grid > *:nth-child(6) { animation-delay: 125ms; }
+.grid > *:nth-child(n + 7) { animation-delay: 150ms; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--surface) / 0.1); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgb(var(--surface) / 0.18); }
+
+/* List views: rows instead of cards. */
+.list-rows { display: flex; flex-direction: column; gap: 6px; }
+.list-rows > * { animation: rise 260ms var(--ease) both; }
+.list-rows > *:nth-child(2) { animation-delay: 20ms; }
+.list-rows > *:nth-child(3) { animation-delay: 40ms; }
+.list-rows > *:nth-child(4) { animation-delay: 60ms; }
+.list-rows > *:nth-child(5) { animation-delay: 80ms; }
+.list-rows > *:nth-child(6) { animation-delay: 100ms; }
+.list-rows > *:nth-child(n + 7) { animation-delay: 120ms; }
+
+/* Anything that should cascade in the same way. */
+.stagger > * { animation: rise 280ms var(--ease) both; }
+.stagger > *:nth-child(2) { animation-delay: 25ms; }
+.stagger > *:nth-child(3) { animation-delay: 50ms; }
+.stagger > *:nth-child(4) { animation-delay: 75ms; }
+.stagger > *:nth-child(5) { animation-delay: 100ms; }
+.stagger > *:nth-child(6) { animation-delay: 125ms; }
+.stagger > *:nth-child(n + 7) { animation-delay: 150ms; }
+.enter-soft { animation: rise 260ms var(--ease) both; }
+@keyframes pop { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+.pop { animation: pop 220ms var(--ease) both; }
