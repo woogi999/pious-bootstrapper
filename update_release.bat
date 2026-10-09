@@ -3,7 +3,8 @@ setlocal EnableExtensions
 rem ---------------------------------------------------------------------
 rem  Pious - start a release.
 rem
-rem    update_release.bat          release the version in Cargo.toml
+rem    update_release.bat          release the version in Cargo.toml (if it's
+rem                                already released, Enter picks the next patch)
 rem    update_release.bat patch    1.0.0 -> 1.0.1 first
 rem    update_release.bat minor    1.0.0 -> 1.1.0 first
 rem    update_release.bat major    1.0.0 -> 2.0.0 first
