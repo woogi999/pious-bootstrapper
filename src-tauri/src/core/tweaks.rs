@@ -297,6 +297,13 @@ pub async fn preset_mods(tweaks: &Tweaks, cache: &Path, build: &Path) -> Result<
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
+    // The mod maker's pictures first: a chosen cursor or shift lock
+    // (below), plugins and the user's own mods are written after them, so
+    // they win.
+    if tweaks.ui_mod.enabled {
+        let (build, ui, cache) = (build.to_path_buf(), tweaks.ui_mod.clone(), cache.to_path_buf());
+        out.extend(tokio::task::spawn_blocking(move || crate::core::modmaker::files(&build, &ui, &cache)).await.map_err(|e| e.to_string())?);
+    }
     for (target, url) in preset_files(tweaks) {
         let parts: Vec<&str> = url.rsplit('/').take(2).collect();
         let name = format!("{}-{}", parts[1], parts[0]);

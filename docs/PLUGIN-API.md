@@ -4,18 +4,26 @@ Everything a plugin's page and engine can ask Pious for. The basics
 (folders, `plugin.json`, permissions in words) are in **Plugins and making
 one**; this page lists every method and event.
 
-## Two halves
+## Its parts
 
 A plugin can have:
 
 - a **page** (`"page": "index.html"`): shown in Pious's sidebar while you
   look at it;
+- an **overlay panel** (`"overlay": "overlay.html"`): a small page shown as a
+  panel in the in-game overlay (`Home`), next to Friends, Recording and the
+  rest. It's off until the user turns it on (the overlay's **+** chips,
+  Settings → Overlay, or your page calling `pious.ui.overlay.show(true)`),
+  and it can be moved, resized, pinned and hidden like Pious's own panels.
+  The panel takes the height of your page's content (up to 60% of the
+  screen). It has the same permissions as your page, and gets your engine's
+  `send` messages too, so page and panel always agree;
 - an **engine** (`"main": "engine.js"`): a script that runs in the
   background for as long as the plugin is on, whether its page is open or
   not. Macros, timers, hotkeys and anything that has to keep working live
   here.
 
-Both load `pious-plugin.js` (Pious keeps a current copy in every plugin's
+All of them load `pious-plugin.js` (Pious keeps a current copy in every plugin's
 folder) and use the global `pious`. The engine runs in a hidden page, so
 `document` exists but nothing is shown; use `pious.sleep()` rather than
 `setTimeout` for anything that must be on time (hidden pages' timers are
@@ -45,6 +53,9 @@ if the plugin lacks the permission or the call fails. The helpers below
 | `send(message)` | Sends any JSON value to the plugin's other half (page ↔ engine): its `"message"` event. |
 | `status(info)` | What the plugin is doing, as a chip in Pious's top bar: `{ text, active }`, or `null` to remove it. Clicking it opens the plugin's page. |
 | `respond(rid, value, error)` | Answers a `"request"` (the `pious.handle` helper does this for you). |
+| `ui.icons(names)` | Pious's icons as SVG markup: `{ name: svg }` (helpers: `pious.ui.icon(name)`, `pious.ui.icons([...])`). |
+| `overlay.shown()` | Whether this plugin's overlay panel is turned on (`pious.ui.overlay.shown()`). |
+| `overlay.show(on)` | Turns this plugin's overlay panel on or off (`pious.ui.overlay.show(true)`). |
 
 ### `read`, `launch`, `notify`, `navigate`, `links`
 

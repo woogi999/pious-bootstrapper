@@ -896,7 +896,57 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Asks Windows to run this program again as administrator, with the same
+/// arguments. True when that copy started (this one should then quit).
+///
+/// Setup starts as whoever started it, so any program can start it (Pious
+/// 1.0.0 starts it the plain way, which Windows refuses for a program that
+/// demands administrator rights up front). It only asks when the signed-in
+/// account is an administrator: elevating with another account's password
+/// would install into that account's folders instead. If the user says no,
+/// Setup carries on without: everything it does in the user's own folders
+/// works either way.
+fn relaunch_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevationType, TokenElevationTypeLimited};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if elevated() || args.iter().any(|a| a == "--elevated") {
+        return false;
+    }
+    // A limited token of an administrator (UAC's split token) can be raised.
+    let can_raise = unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            false
+        } else {
+            let mut kind: TOKEN_ELEVATION_TYPE = 0;
+            let mut size = 0u32;
+            let ok = GetTokenInformation(token, TokenElevationType, &mut kind as *mut _ as *mut _, std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32, &mut size);
+            CloseHandle(token);
+            ok != 0 && kind == TokenElevationTypeLimited
+        }
+    };
+    if !can_raise {
+        return false;
+    }
+    let Ok(me) = std::env::current_exe() else { return false };
+    let quote = |a: &str| if a.is_empty() || a.contains([' ', '\t', '"']) { format!("\"{}\"", a.replace('"', "\\\"")) } else { a.to_owned() };
+    let params = args.iter().map(|a| quote(a)).chain(std::iter::once("--elevated".to_owned())).collect::<Vec<_>>().join(" ");
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (verb, file, params) = (wide("runas"), wide(&me.display().to_string()), wide(&params));
+    let result = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), SW_SHOWNORMAL) };
+    // Above 32: started. Anything else (the user said no): carry on here.
+    result as isize > 32
+}
+
 fn main() {
+    if relaunch_elevated() {
+        return;
+    }
     let opts = options();
     // The uninstaller can't delete the folder it runs from: run a copy
     // from the temp folder instead.

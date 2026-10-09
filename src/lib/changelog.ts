@@ -6,6 +6,25 @@ export interface Release {
   blocks: ({ kind: "heading"; text: string } | { kind: "list"; items: string[] } | { kind: "text"; text: string })[];
 }
 
+/** A piece of a line: plain, **bold**, `code`, or a [link](…) (shown as its text). */
+export type Span = { kind: "text" | "bold" | "code"; text: string };
+
+/** Splits a line's Markdown into pieces to draw (never as HTML). */
+export function spans(line: string): Span[] {
+  const out: Span[] = [];
+  const pattern = /\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\([^)]*\)/g;
+  let at = 0;
+  for (const match of line.matchAll(pattern)) {
+    if (match.index! > at) out.push({ kind: "text", text: line.slice(at, match.index) });
+    if (match[1] !== undefined) out.push({ kind: "bold", text: match[1] });
+    else if (match[2] !== undefined) out.push({ kind: "code", text: match[2] });
+    else out.push({ kind: "text", text: match[3] });
+    at = match.index! + match[0].length;
+  }
+  if (at < line.length) out.push({ kind: "text", text: line.slice(at) });
+  return out;
+}
+
 export function parseChangelog(text: string): Release[] {
   const releases: Release[] = [];
   let current: Release | null = null;

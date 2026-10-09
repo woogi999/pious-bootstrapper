@@ -74,6 +74,19 @@ pictures named for their side (`back`, `front`, `left`, `right`, `up`,
 files work too). Games that set their own sky keep it, and **Gray sky**
 (Performance) wins over any sky.
 
+**Mod maker** recolors Roblox's own interface pictures (top bar, menus and
+settings, chat, backpack, emotes, player list, voice chat, cursors, shift
+lock, loading screen, the Roblox logo) with one color or a two-color
+gradient at any angle, keeping each picture's light and shade unless you
+turn that off. The preview shows your own Roblox version's icons. Pious makes
+it from each version's original pictures when tweaks apply, so it follows
+Roblox's updates; a cursor or shift lock chosen above, plugins and your mods
+folder win over it.
+
+The **shift lock cursor** replaces the picture Roblox's own shift lock
+shows. Games with their own shift lock (many battlegrounds games) draw their
+own crosshair, which no mod can change.
+
 See **Roblox mods
 and FastFlags** for how files are replaced, and **Plugins** for packs of
 cursors, sounds and death sounds you can install as plugins.

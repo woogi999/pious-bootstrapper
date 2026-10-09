@@ -279,6 +279,31 @@ pub fn set_default_version(service: Service<'_>, choice: VersionChoice) {
 }
 
 #[tauri::command]
+pub async fn pin_current_version(service: Service<'_>) -> Reply<String> {
+    service.pin_current_version().await
+}
+
+#[tauri::command]
+pub async fn pin_version(service: Service<'_>, hash: String) -> Reply {
+    service.pin_version(hash).await
+}
+
+#[tauri::command]
+pub fn unpin_version(service: Service<'_>) {
+    service.unpin_version()
+}
+
+#[tauri::command]
+pub fn set_version_profile(service: Service<'_>, name: String, guid: String) -> Reply {
+    service.set_version_profile(name, guid)
+}
+
+#[tauri::command]
+pub fn remove_version_profile(service: Service<'_>, name: String) {
+    service.remove_version_profile(name)
+}
+
+#[tauri::command]
 pub async fn load_builds(service: Service<'_>) -> Reply {
     service.load_builds().await;
     Ok(())
@@ -516,6 +541,29 @@ pub fn shiftlock_previews(color: Option<String>) -> Vec<(String, String, String)
             ((*id).to_owned(), (*name).to_owned(), format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
         })
         .collect()
+}
+
+/// The mod maker's parts: (ID, name).
+#[tauri::command]
+pub fn mod_maker_parts() -> Vec<(String, String)> {
+    crate::core::modmaker::PARTS.iter().map(|(id, name, _)| ((*id).to_owned(), (*name).to_owned())).collect()
+}
+
+/// A few of Roblox's own pictures recolored with `ui`, from the newest
+/// Roblox version installed: (part name, data: URL).
+#[tauri::command]
+pub async fn mod_maker_preview(service: Service<'_>, ui: crate::core::modmaker::UiMod) -> Reply<Vec<(String, String)>> {
+    let build = {
+        let s = service.read();
+        s.bootstrapper
+            .versions
+            .iter()
+            .filter(|v| v.path.join("RobloxPlayerBeta.exe").is_file())
+            .max_by_key(|v| v.installed_at)
+            .map(|v| v.path.clone())
+    };
+    let build = build.ok_or("Install a Roblox version first (Versions) to see a preview.")?;
+    tauri::async_runtime::spawn_blocking(move || crate::core::modmaker::preview(&build, &ui, 3)).await.map_err(|e| e.to_string())
 }
 
 /// The sky presets: ID, name and a picture (data: URL).

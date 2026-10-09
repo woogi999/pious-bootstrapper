@@ -11,6 +11,7 @@
   import { parseFlags } from "../lib/flags";
   import InternetSettings from "../components/InternetSettings.svelte";
   import LaunchSettings from "../components/LaunchSettings.svelte";
+  import ModMaker from "../components/ModMaker.svelte";
   import { copy } from "../lib/menus";
   import type { FlagProfile, GraphicsApi, Tweaks } from "../lib/types";
   import FontPreview from "../components/FontPreview.svelte";
@@ -499,7 +500,7 @@
       <SettingRow
         icon="target"
         title="Shift lock cursor"
-        description="The crosshair while shift lock is on: one in the style of another game, or any picture (a 64×64 PNG works best). Applies the next time a game starts."
+        description="The crosshair while Roblox's own shift lock is on: one in the style of another game, or any picture (a 64×64 PNG works best). Applies the next time a game starts. Games with their own shift lock (many battlegrounds games) draw their own crosshair and keep it."
         {off}
       >
         {#if tweaks.shiftlock && tweaks.shiftlock !== "custom"}
@@ -546,6 +547,8 @@
         {off}
       />
       <PictureChoices items={skies} value={tweaks.skybox} custom={tweaks.skybox_folder} disabled={off} onpick={(id) => set({ skybox: id })} oncustom={pickSky} />
+      <hr class="divider" />
+      <ModMaker {off} />
       <hr class="divider" />
       <SettingRow
         icon="sparkles"

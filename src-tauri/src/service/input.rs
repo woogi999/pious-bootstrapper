@@ -27,8 +27,6 @@ pub struct InputWindows {
     /// It should be on screen (its window stays a moment longer while it
     /// animates out).
     pub visible: bool,
-    /// Counts the game's frames while the FPS counter is on.
-    pub fps: Option<crate::core::fps::Meter>,
 }
 
 impl Service {
@@ -81,8 +79,6 @@ impl Service {
         let mut refreshed: Option<Instant> = None;
         let mut sent_version = u64::MAX;
         let mut shown = false;
-        let mut fps_checked = Instant::now();
-        let mut sent_fps = u32::MAX;
         loop {
             tokio::time::sleep(Duration::from_millis(16)).await;
             let dirty = std::mem::take(&mut self.read().input_dirty);
@@ -95,53 +91,20 @@ impl Service {
 
             // The overlay shows while it's on (and, if asked, only while a
             // game is in front, or only while Pious is recording or keeping
-            // clips).
-            let (enabled, wanted, show_fps) = {
+            // clips). The frame rate is the game stats overlay's.
+            let (enabled, wanted) = {
                 let s = self.read();
                 let o = &s.bootstrapper.preferences.input_overlay;
                 let wanted = o.enabled
                     && (s.inputs.editing
                         || ((!o.only_in_game || s.foreground_roblox.is_some())
                             && (!o.only_while_capturing || s.capture.session.is_some())));
-                (o.enabled, wanted, o.show_fps)
+                (o.enabled, wanted)
             };
             if wanted != shown {
                 shown = wanted;
                 self.show_input_overlay(wanted);
                 sent_version = u64::MAX;
-                sent_fps = u32::MAX;
-            }
-
-            // The FPS counter: watch the game in front (or any game).
-            if fps_checked.elapsed() >= Duration::from_millis(250) {
-                fps_checked = Instant::now();
-                let watching = shown && show_fps;
-                let area = if watching {
-                    let pid = self.read().foreground_roblox;
-                    tokio::task::spawn_blocking(move || {
-                        let pid = pid.or_else(|| process::roblox_pids().first().copied())?;
-                        process::window_of(pid).and_then(process::client_rect)
-                    })
-                    .await
-                    .unwrap_or(None)
-                } else {
-                    None
-                };
-                let fps = {
-                    let mut s = self.read();
-                    if watching {
-                        let meter = s.inputs.fps.get_or_insert_with(crate::core::fps::Meter::start);
-                        meter.watch(area);
-                        Some(if area.is_some() { meter.fps() } else { 0 })
-                    } else {
-                        s.inputs.fps = None;
-                        None
-                    }
-                };
-                if let Some(fps) = fps.filter(|f| *f != sent_fps) {
-                    sent_fps = fps;
-                    let _ = self.app().emit_to(INPUTS_WINDOW, "input-fps", fps);
-                }
             }
             if !enabled {
                 // Nothing to draw; check back less often.
@@ -284,7 +247,7 @@ impl Service {
     pub fn input_overlay_resize(&self, width: f64, height: f64) {
         self.mutate(|s| s.inputs.size = Some((width, height)));
         if let Some(window) = self.app().get_webview_window(INPUTS_WINDOW) {
-            let _ = window.set_size(LogicalSize::new(width.max(40.0), height.max(30.0)));
+            resize_anchored(&window, width.max(40.0), height.max(30.0));
         }
     }
 
@@ -325,7 +288,47 @@ pub(super) fn place(app: &AppHandle, window: &WebviewWindow, x: f32, y: f32) {
     if let Some(m) = monitor {
         let px = m.position().x + (m.size().width as f32 * x.clamp(0.0, 1.0)) as i32;
         let py = m.position().y + (m.size().height as f32 * y.clamp(0.0, 1.0)) as i32;
+        // Fully on that screen, at the size it is now.
+        let (w, h) = window.outer_size().map(|s| (s.width as i32, s.height as i32)).unwrap_or((0, 0));
+        let (mx, my, mw, mh) = (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32);
+        let px = px.clamp(mx, (mx + mw - w).max(mx));
+        let py = py.clamp(my, (my + mh - h).max(my));
         let _ = window.set_position(PhysicalPosition::new(px, py));
+    }
+}
+
+/// Resizes an overlay window to `width` × `height` (logical pixels) so it
+/// grows toward the middle of its screen: one on the right half keeps its
+/// right edge where it is and grows left, one on the bottom half grows up.
+/// It's always kept fully on its screen.
+pub(super) fn resize_anchored(window: &WebviewWindow, width: f64, height: f64) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (new_w, new_h) = ((width * scale).round() as i32, (height * scale).round() as i32);
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        let _ = window.set_size(LogicalSize::new(width, height));
+        return;
+    };
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        let _ = window.set_size(LogicalSize::new(width, height));
+        return;
+    };
+    let (mx, my) = (monitor.position().x, monitor.position().y);
+    let (mw, mh) = (monitor.size().width as i32, monitor.size().height as i32);
+    let (old_w, old_h) = (size.width as i32, size.height as i32);
+    let mut x = position.x;
+    let mut y = position.y;
+    if x + old_w / 2 > mx + mw / 2 {
+        x = position.x + old_w - new_w;
+    }
+    if y + old_h / 2 > my + mh / 2 {
+        y = position.y + old_h - new_h;
+    }
+    // On screen, whatever happens.
+    x = x.clamp(mx, (mx + mw - new_w).max(mx));
+    y = y.clamp(my, (my + mh - new_h).max(my));
+    let _ = window.set_size(LogicalSize::new(width, height));
+    if (x, y) != (position.x, position.y) {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 }
 

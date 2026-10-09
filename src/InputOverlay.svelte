@@ -1,8 +1,9 @@
 <!-- The input overlay: the keys and mouse buttons you press, drawn over
-     the game like streamers' key overlays, with clicks and keys per second
-     and the game's frame rate. It never takes the mouse, except while it's
-     being moved (Settings → Overlay → Move it). It animates in when it
-     shows up and out before its window hides. -->
+     the game like streamers' key overlays, with clicks and keys per second.
+     (The frame rate and other numbers are the game stats overlay's job.) It
+     never takes the mouse, except while it's being moved (Settings →
+     Overlay → Move it). It animates in when it shows up and out before its
+     window hides. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -29,7 +30,6 @@
   let keys: number[] = [];
   let cps = $state(0);
   let kps = $state(0);
-  let fps = $state(0);
 
   function apply(state: InputState) {
     held = new Set(state.keys);
@@ -72,7 +72,6 @@
     connect();
     const offState = listen<InputState>("input-state", (e) => apply(e.payload));
     const offEdit = listen<boolean>("input-edit", (e) => (editing = e.payload));
-    const offFps = listen<number>("input-fps", (e) => (fps = e.payload));
     const offVisible = listen<boolean>("input-visible", (e) => (visible = e.payload));
     invoke<InputState>("input_state").then(apply).catch(() => {});
     // The window was made because it's wanted: come in once painted.
@@ -82,7 +81,6 @@
     return () => {
       offState.then((f) => f());
       offEdit.then((f) => f());
-      offFps.then((f) => f());
       offVisible.then((f) => f());
       clearInterval(decay);
     };
@@ -103,15 +101,16 @@
 
 {#if o}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- The window is sized to this frame: the overlay and, while it's being
+       moved, the bar under it (its own row, so it's never cut off). -->
+  <div bind:this={root} class="frame" class:editing onmousedown={drag}>
   <div
-    bind:this={root}
     class="overlay anim-{o.animation}"
     class:in={visible}
     class:slanted
     class:editing
     class:bold={o.bold}
     class:upper={o.uppercase}
-    onmousedown={drag}
     style="
       --size: {o.key_size * o.scale}px;
       --gap: {o.gap * o.scale}px;
@@ -152,7 +151,7 @@
       </div>
     {/if}
 
-    {#if o.show_mouse || o.show_rates || o.show_fps}
+    {#if o.show_mouse || o.show_rates}
       <div class="side" style="--d: {order.total * 14}ms">
         {#if o.show_mouse}
           <svg class="mouse" viewBox="-10 -2 120 164" aria-hidden="true">
@@ -176,28 +175,22 @@
             <rect class="part" class:down={held.has("MouseBack")} x="-6" y="100" width="9" height="20" rx="4" />
           </svg>
         {/if}
-        {#if o.show_rates || o.show_fps}
+        {#if o.show_rates}
           <div class="rates">
-            {#if o.show_rates}
-              <span class="key rate"><span class="label">{cps}<small>CPS</small></span></span>
-              <span class="key rate"><span class="label">{kps}<small>KPS</small></span></span>
-            {/if}
-            {#if o.show_fps}
-              <span class="key rate fps" title="Frames the game showed in the last second (up to your screen's refresh rate)">
-                <span class="label">{fps}<small>FPS</small></span>
-              </span>
-            {/if}
+            <span class="key rate"><span class="label">{cps}<small>CPS</small></span></span>
+            <span class="key rate"><span class="label">{kps}<small>KPS</small></span></span>
           </div>
         {/if}
       </div>
     {/if}
 
-    {#if editing}
-      <div class="edit-bar">
-        <span>Drag to move</span>
-        <button onclick={() => invoke("input_overlay_edit", { on: false })}>Done</button>
-      </div>
-    {/if}
+  </div>
+  {#if editing}
+    <div class="edit-bar">
+      <span>Drag to move</span>
+      <button onclick={() => invoke("input_overlay_edit", { on: false })}>Done</button>
+    </div>
+  {/if}
   </div>
 {/if}
 
@@ -207,10 +200,19 @@
     background: transparent !important;
     overflow: hidden;
   }
-  .overlay {
+  .frame {
     position: absolute;
     top: 12px;
     left: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .frame.editing {
+    cursor: move;
+  }
+  .overlay {
     display: flex;
     align-items: flex-end;
     gap: calc(var(--gap) * 2.5);
@@ -241,8 +243,6 @@
   .overlay.editing {
     outline: 2px dashed rgb(255 255 255 / 0.7);
     outline-offset: 2px;
-    cursor: move;
-    padding-bottom: calc(var(--gap) * 1.5 + 30px);
   }
   .bold {
     font-weight: 800;
@@ -391,14 +391,13 @@
     margin-left: 0.3em;
   }
   .edit-bar {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 4px;
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 8px;
+    padding: 4px 4px 4px 12px;
+    border-radius: 99px;
+    background: rgb(0 0 0 / 0.65);
+    white-space: nowrap;
     font: 600 12px Manrope, system-ui, sans-serif;
     text-transform: none;
     color: white;

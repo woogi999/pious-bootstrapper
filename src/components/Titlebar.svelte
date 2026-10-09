@@ -1,9 +1,10 @@
 <!-- The custom title bar. Dragging anywhere but the buttons moves the window.
      In fullscreen it's hidden, leaving only a fullscreen toggle at the top right.
-     Keep on top lives in Settings and its shortcut (Ctrl T). -->
+     The pin at the left keeps Pious on top (also in Settings, and Ctrl T). -->
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
+  import { setPreferences } from "../lib/api";
   import { app, PAGE_TITLES } from "../lib/state.svelte";
   import { keyLabel } from "../lib/keys";
   import { keysFor, toggleFullscreen } from "../lib/shortcuts";
@@ -14,6 +15,7 @@
     app.page.name === "plugin" ? (app.snap?.plugins.find((p) => app.page.name === "plugin" && p.id === app.page.id)?.name ?? "Plugin") : PAGE_TITLES[app.page.name],
   );
   const hint = (id: string) => (keysFor(id) ? ` (${keyLabel(keysFor(id))})` : "");
+  const pinned = $derived(app.snap?.bootstrapper.preferences.pinned ?? false);
 </script>
 
 {#if app.fullscreen}
@@ -22,6 +24,16 @@
   </button>
 {:else}
   <div class="bar" data-tauri-drag-region>
+    <button
+      class="pin"
+      class:on={pinned}
+      aria-label="Keep on top"
+      aria-pressed={pinned}
+      title={(pinned ? "Kept on top: click to stop" : "Keep on top") + hint("pin")}
+      onclick={() => setPreferences({ pinned: !pinned })}
+    >
+      <Icon name="pin" size={13} />
+    </button>
     <span class="title" data-tauri-drag-region>Pious <span class="sep">·</span> {title}</span>
     <div class="controls">
       <button aria-label="Minimize" title="Minimize" onclick={() => win.minimize()}><Icon name="minimize" size={15} /></button>
@@ -45,9 +57,29 @@
     background: rgb(var(--bg) / 0.35);
     border-bottom: 1px solid rgb(var(--surface) / 0.05);
   }
+  .pin {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 100%;
+    margin-left: 4px;
+    border: none;
+    background: none;
+    color: rgb(var(--faint));
+    cursor: pointer;
+    transition: color var(--fast), background var(--fast), transform var(--fast) var(--ease);
+  }
+  .pin:hover {
+    color: rgb(var(--text));
+    background: rgb(var(--surface) / 0.06);
+  }
+  .pin.on {
+    color: rgb(var(--accent));
+    transform: rotate(-30deg);
+  }
   .title {
     flex: 1;
-    padding: 0 16px;
+    padding: 0 16px 0 4px;
     font-size: 11.5px;
     font-weight: 600;
     color: rgb(var(--faint));

@@ -119,6 +119,39 @@ pub async fn recommend(mut seeds: Vec<Seed>, exclude: HashSet<u64>, limit: usize
     Ok(out)
 }
 
+/// What's popular on Roblox right now, for when there's nothing to go on
+/// yet (no accounts, a new account, nothing played): Roblox's own charts,
+/// minus games already in the library.
+pub async fn popular(exclude: HashSet<u64>, limit: usize) -> Result<Vec<Recommendation>, String> {
+    let games = roblox::popular_games().await?;
+    Ok(from_popular(games, &exclude, limit))
+}
+
+fn from_popular(games: Vec<SuggestedGame>, exclude: &HashSet<u64>, limit: usize) -> Vec<Recommendation> {
+    let total = games.len().max(1) as f32;
+    games
+        .into_iter()
+        .filter(|g| !exclude.contains(&g.universe_id))
+        .enumerate()
+        .take(limit)
+        .map(|(rank, g)| {
+            let votes = g.up_votes + g.down_votes;
+            Recommendation {
+                universe_id: g.universe_id,
+                place_id: g.place_id,
+                name: g.name,
+                creator: g.creator,
+                players: g.players,
+                rating: (votes > 50).then(|| g.up_votes as f32 / votes as f32),
+                // Roblox's order, kept.
+                score: 1.0 - rank as f32 / total,
+                because: vec!["Popular on Roblox".into()],
+                accounts: Vec::new(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +160,14 @@ mod tests {
     async fn no_seeds_means_no_recommendations() {
         let recs = recommend(Vec::new(), HashSet::new(), 8).await.unwrap();
         assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn popular_keeps_roblox_order_and_skips_the_library() {
+        let game = |id: u64| SuggestedGame { universe_id: id, place_id: id * 10, name: format!("G{id}"), creator: String::new(), players: 5, up_votes: 90, down_votes: 10 };
+        let recs = from_popular(vec![game(1), game(2), game(3)], &[2].into(), 8);
+        assert_eq!(recs.iter().map(|r| r.universe_id).collect::<Vec<_>>(), [1, 3]);
+        assert!(recs[0].score > recs[1].score);
+        assert_eq!(recs[0].because, ["Popular on Roblox"]);
     }
 }

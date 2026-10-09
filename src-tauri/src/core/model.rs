@@ -18,6 +18,9 @@ pub struct Bootstrapper {
     pub versions: Vec<VersionRecord>,
     pub activity: Vec<Activity>,
     pub preferences: Preferences,
+    /// The Pious version that last saved this ("" before 1.0.2). An older
+    /// Pious never saves over data a newer one wrote (see `store::load`).
+    pub saved_by: String,
     /// The account the sidebar switcher picked for this session: what Play
     /// uses unless a game has an account pinned. Not saved; each session
     /// starts with the default account.
@@ -86,18 +89,55 @@ impl Bootstrapper {
             .max_by_key(|v| v.installed_at)
     }
 
+    /// The installed build Pious is pinned to, if there is one and it's usable.
+    pub fn pinned_version(&self) -> Option<&VersionRecord> {
+        let hash = self.preferences.pinned_version_guid.as_deref()?;
+        self.version(hash).filter(|v| v.is_usable())
+    }
+
+    /// The GUID a version profile names.
+    pub fn profile_guid(&self, name: &str) -> Result<&str, String> {
+        self.preferences.version_profiles.get(name).map(String::as_str).ok_or_else(|| format!("There's no version profile named \"{name}\"."))
+    }
+
+    /// The GUID the operator chose for a launch: the game's own build or
+    /// profile, else the pin, else the default version's build or profile.
+    /// `None` means LIVE's current build (see `core::deployment`).
+    pub fn chosen_guid(&self, choice: &VersionChoice) -> Result<Option<String>, String> {
+        match choice {
+            VersionChoice::Specific(hash) => return Ok(Some(hash.clone())),
+            VersionChoice::Profile(name) => return self.profile_guid(name).map(|g| Some(g.to_owned())),
+            VersionChoice::Default | VersionChoice::Latest => {}
+        }
+        if let Some(pinned) = &self.preferences.pinned_version_guid {
+            return Ok(Some(pinned.clone()));
+        }
+        match (choice, &self.preferences.default_version) {
+            (VersionChoice::Default, VersionChoice::Specific(hash)) => Ok(Some(hash.clone())),
+            (VersionChoice::Default, VersionChoice::Profile(name)) => self.profile_guid(name).map(|g| Some(g.to_owned())),
+            _ => Ok(None),
+        }
+    }
+
     /// Resolves a [`VersionChoice`] to a concrete installed version, if any.
     pub fn resolve_version(&self, choice: &VersionChoice) -> Option<&VersionRecord> {
+        // A pinned build stands in for "Default" and "Latest"; a game set to
+        // a specific build still gets that build.
+        if matches!(choice, VersionChoice::Default | VersionChoice::Latest) {
+            if let Some(pinned) = self.pinned_version() {
+                return Some(pinned);
+            }
+        }
+        let installed = |hash: &str| self.version(hash).filter(|v| v.is_usable());
         match choice {
             VersionChoice::Default => match &self.preferences.default_version {
-                VersionChoice::Specific(hash) => self
-                    .version(hash)
-                    .filter(|v| v.is_usable())
-                    .or_else(|| self.latest_installed()),
+                VersionChoice::Specific(hash) => installed(hash).or_else(|| self.latest_installed()),
+                VersionChoice::Profile(name) => self.profile_guid(name).ok().and_then(installed).or_else(|| self.latest_installed()),
                 _ => self.latest_installed(),
             },
             VersionChoice::Latest => self.latest_installed(),
-            VersionChoice::Specific(hash) => self.version(hash).filter(|v| v.is_usable()),
+            VersionChoice::Specific(hash) => installed(hash),
+            VersionChoice::Profile(name) => self.profile_guid(name).ok().and_then(installed),
         }
     }
 
@@ -307,6 +347,8 @@ pub enum VersionChoice {
     Latest,
     /// Pin to a specific build hash.
     Specific(String),
+    /// The build a named entry of `Preferences::version_profiles` points at.
+    Profile(String),
 }
 
 /// Which server a launch should join.
@@ -468,6 +510,19 @@ pub struct Preferences {
     pub taskbar: Taskbar,
     /// Keep Roblox up to date in the background.
     pub auto_update_roblox: bool,
+    /// The build GUID ("version-…") Pious stays on. `None` resolves LIVE's
+    /// current build; `Some` never asks the network and skips background
+    /// updates. Older saves called it `pinned_version`.
+    #[serde(alias = "pinned_version")]
+    pub pinned_version_guid: Option<String>,
+    /// The only channel Pious resolves: always "LIVE", whatever was saved
+    /// (an account's rollout channel and the old `force_live_channel`
+    /// setting are ignored).
+    #[serde(deserialize_with = "locked_channel")]
+    pub locked_channel: String,
+    /// Named builds a game or the default version can point at
+    /// (`VersionChoice::Profile`): name → GUID.
+    pub version_profiles: std::collections::HashMap<String, String>,
     /// Keep crash reports (Pious's and Roblox's) in the data folder.
     pub crash_reports: bool,
     /// Where public servers are joined: "auto" (Roblox's matchmaking),
@@ -596,7 +651,8 @@ pub struct InputOverlay {
     pub show_scroll: bool,
     /// Clicks and keys per second.
     pub show_rates: bool,
-    /// The game's frame rate.
+    /// The game's frame rate. No longer shown here: it moved to the game
+    /// stats overlay (`migrate_defaults` carries a "true" over).
     pub show_fps: bool,
     /// Where it sits on the game's screen, as fractions (0–1) of the screen.
     pub x: f32,
@@ -1083,6 +1139,9 @@ pub struct Tweaks {
     /// leaves Windows' setting alone.
     #[serde(default)]
     pub gpu: Option<String>,
+    /// The mod maker: Roblox's interface recolored (see `core::modmaker`).
+    #[serde(default)]
+    pub ui_mod: crate::core::modmaker::UiMod,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1217,6 +1276,7 @@ impl Default for Tweaks {
             skybox: None,
             skybox_folder: None,
             gpu: None,
+            ui_mod: Default::default(),
         }
     }
 }
@@ -1531,6 +1591,9 @@ impl Default for Preferences {
             emoji_shortcodes: EmojiShortcodes::default(),
             taskbar: Taskbar::default(),
             auto_update_roblox: false,
+            pinned_version_guid: None,
+            locked_channel: crate::core::deployment::LOCKED_CHANNEL.into(),
+            version_profiles: Default::default(),
             crash_reports: true,
             region: "auto".into(),
             arrange_layout: "grid".into(),
@@ -1601,6 +1664,15 @@ impl Preferences {
             // MOV became the default container.
             if self.recorder.container == Container::Mp4 {
                 self.recorder.container = Container::Mov;
+            }
+        }
+        // The keys overlay's FPS counter moved to the game stats overlay:
+        // whoever had it on gets it there instead of losing it.
+        if self.input_overlay.show_fps {
+            self.input_overlay.show_fps = false;
+            self.stats_overlay.enabled = true;
+            if !self.stats_overlay.items.iter().any(|i| i == "fps") {
+                self.stats_overlay.items.insert(0, "fps".into());
             }
         }
         self.defaults_version = DEFAULTS_VERSION;
@@ -1680,9 +1752,69 @@ pub fn parse_server_link(input: &str) -> Option<ServerLink> {
     None
 }
 
+/// Reads `locked_channel` and drops what was saved: it's always LIVE.
+fn locked_channel<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(crate::core::deployment::LOCKED_CHANNEL.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_build_stands_in_for_default_and_latest() {
+        let root = std::env::temp_dir().join(format!("pious-pin-{}", Uuid::new_v4()));
+        let record = |hash: &str, age: i64| {
+            let path = root.join(hash);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("RobloxPlayerBeta.exe"), b"").unwrap();
+            VersionRecord {
+                hash: hash.into(),
+                version: None,
+                path,
+                source: VersionSource::Pious,
+                installed_at: Utc::now() - chrono::Duration::days(age),
+                valid: true,
+                label: None,
+            }
+        };
+        let mut library = Bootstrapper::default();
+        library.versions = vec![record("version-aaaaaaaaaaaaaaaa", 10), record("version-bbbbbbbbbbbbbbbb", 0)];
+        assert_eq!(library.resolve_version(&VersionChoice::Latest).unwrap().hash, "version-bbbbbbbbbbbbbbbb");
+
+        library.preferences.pinned_version_guid = Some("version-aaaaaaaaaaaaaaaa".into());
+        assert_eq!(library.resolve_version(&VersionChoice::Latest).unwrap().hash, "version-aaaaaaaaaaaaaaaa");
+        assert_eq!(library.resolve_version(&VersionChoice::Default).unwrap().hash, "version-aaaaaaaaaaaaaaaa");
+        // A game set to a specific build keeps it.
+        let specific = VersionChoice::Specific("version-bbbbbbbbbbbbbbbb".into());
+        assert_eq!(library.resolve_version(&specific).unwrap().hash, "version-bbbbbbbbbbbbbbbb");
+        // A pin to a build that isn't installed is ignored.
+        library.preferences.pinned_version_guid = Some("version-cccccccccccccccc".into());
+        assert_eq!(library.resolve_version(&VersionChoice::Latest).unwrap().hash, "version-bbbbbbbbbbbbbbbb");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chosen_guid_is_profile_then_pin_then_live() {
+        let mut library = Bootstrapper::default();
+        assert_eq!(library.chosen_guid(&VersionChoice::Default), Ok(None));
+        library.preferences.version_profiles.insert("comp".into(), "version-aaaaaaaaaaaaaaaa".into());
+        library.preferences.pinned_version_guid = Some("version-bbbbbbbbbbbbbbbb".into());
+        assert_eq!(library.chosen_guid(&VersionChoice::Profile("comp".into())), Ok(Some("version-aaaaaaaaaaaaaaaa".into())));
+        assert_eq!(library.chosen_guid(&VersionChoice::Latest), Ok(Some("version-bbbbbbbbbbbbbbbb".into())));
+        assert!(library.chosen_guid(&VersionChoice::Profile("gone".into())).is_err());
+        library.preferences.pinned_version_guid = None;
+        library.preferences.default_version = VersionChoice::Profile("comp".into());
+        assert_eq!(library.chosen_guid(&VersionChoice::Default), Ok(Some("version-aaaaaaaaaaaaaaaa".into())));
+    }
+
+    #[test]
+    fn old_saves_load_with_the_channel_locked() {
+        let prefs: Preferences = serde_json::from_str(r#"{"pinned_version":"version-aaaaaaaaaaaaaaaa","force_live_channel":false,"locked_channel":"zcanary"}"#).unwrap();
+        assert_eq!(prefs.pinned_version_guid.as_deref(), Some("version-aaaaaaaaaaaaaaaa"));
+        assert_eq!(prefs.locked_channel, "LIVE");
+    }
 
     #[test]
     fn keybinds_layer_global_account_game() {

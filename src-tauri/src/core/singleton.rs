@@ -97,6 +97,12 @@ mod imp {
     /// Closes Roblox's singleton event inside the client `pid`. True when
     /// it was found (and closed).
     pub fn release(pid: u32) -> bool {
+        release_named(pid, "ROBLOX_singletonEvent")
+    }
+
+    /// Closes the event called `name` inside process `pid`.
+    pub(super) fn release_named(pid: u32, name: &str) -> bool {
+        let suffix = format!("\\{name}");
         let Some(all) = handles() else { return false };
         let process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
         if process.is_null() {
@@ -112,7 +118,7 @@ mod imp {
             }
             // The type first: asking some other kinds (pipes) for their
             // name can hang, events never do.
-            let wanted = query(copy, OBJECT_TYPE_INFORMATION) == "Event" && query(copy, OBJECT_NAME_INFORMATION).ends_with("\\ROBLOX_singletonEvent");
+            let wanted = query(copy, OBJECT_TYPE_INFORMATION) == "Event" && query(copy, OBJECT_NAME_INFORMATION).ends_with(&suffix);
             unsafe { CloseHandle(copy) };
             if wanted {
                 let closed = unsafe {
@@ -138,25 +144,28 @@ pub fn release(_pid: u32) -> bool {
 mod tests {
     use super::*;
 
-    /// Makes an event with Roblox's name in a child process and checks it
-    /// gets closed there. (A child, because closing our own copy proves
-    /// nothing about another process.)
+    /// Makes a named event in a child process and checks it gets closed
+    /// there. (A child, because closing our own copy proves nothing about
+    /// another process.) Its own name, not Roblox's: a Pious running with
+    /// multi-instance on owns Roblox's name, and Windows then refuses to make
+    /// an event called that.
     #[test]
     fn closes_the_event_in_another_process() {
+        let name = format!("PiousTestEvent{}", std::process::id());
         // PowerShell holds the event for a while.
-        let script = "$e = New-Object System.Threading.EventWaitHandle($false, 'ManualReset', 'ROBLOX_singletonEvent'); Start-Sleep 20";
-        let mut child = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", script]).spawn().unwrap();
-        // Wait for it to exist.
+        let script = format!("$e = New-Object System.Threading.EventWaitHandle($false, 'ManualReset', '{name}'); Start-Sleep 30");
+        let mut child = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).spawn().unwrap();
+        // Wait for it to exist (PowerShell can take a while to start).
         let mut released = false;
-        for _ in 0..40 {
+        for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            if release(child.id()) {
+            if imp::release_named(child.id(), &name) {
                 released = true;
                 break;
             }
         }
         let _ = child.kill();
         assert!(released, "the event wasn't found in the child");
-        assert!(!release(child.id()), "already closed");
+        assert!(!imp::release_named(child.id(), &name), "already closed");
     }
 }

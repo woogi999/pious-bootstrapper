@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<!-- Pious Setup always runs as administrator: it can then close every
-     Pious and Roblox process, write anywhere you install to, and replace
-     files another program has open. It opens Pious itself unelevated. -->
+<!-- Pious Setup starts as whoever starts it ("asInvoker"), then asks
+     Windows to run it as administrator itself (see relaunch_elevated in
+     src/main.rs), so it can close every Pious and Roblox process and
+     replace files in use. Demanding administrator here instead would make
+     Windows refuse older Pious versions that start it the plain way. It
+     opens Pious itself unelevated. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>
@@ -18,7 +21,7 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

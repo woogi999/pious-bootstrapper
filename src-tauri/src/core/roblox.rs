@@ -620,15 +620,10 @@ pub struct ClientVersion {
     pub hash: String,
 }
 
-pub async fn latest_client_version() -> Result<ClientVersion, String> {
-    let body = get_json("https://clientsettingscdn.roblox.com/v2/client-version/WindowsPlayer").await?;
-    Ok(ClientVersion {
-        version: body["version"].as_str().unwrap_or_default().to_owned(),
-        hash: body["clientVersionUpload"]
-            .as_str()
-            .ok_or("Roblox didn't report a current version")?
-            .to_owned(),
-    })
+impl From<crate::core::deployment::Deployment> for ClientVersion {
+    fn from(d: crate::core::deployment::Deployment) -> Self {
+        Self { version: d.version, hash: d.version_guid }
+    }
 }
 
 /// A Windows player build listed by weao.xyz.
@@ -711,22 +706,27 @@ async fn deploy_history() -> Result<Vec<KnownBuild>, String> {
     Ok(parse_deploy_history(&text, 300))
 }
 
-/// Lines like `New WindowsPlayer version-abc at 9/4/2024 5:28:45 PM, file
-/// version: 0, 641, 0, 6410693....`
+/// Lines as served (checked 2026-10-10), oldest first:
+/// `New WindowsPlayer version-d599f7fc52a8404c at 3/3/2026 5:15:45 PM, file
+/// version: 0, 711, 0, 7110875, git hash: 0.711.0.7110875 ...`; older ones
+/// end `file version: 0, 641, 0, 6410693...Done!`. Since 3/17/2026 Roblox
+/// writes `version-hidden` instead of the GUID; those lines are skipped.
 fn parse_deploy_history(text: &str, limit: usize) -> Vec<KnownBuild> {
     let mut out = Vec::new();
     for line in text.lines().rev() {
         let Some(rest) = line.trim().strip_prefix("New WindowsPlayer ") else { continue };
         let Some((hash, rest)) = rest.split_once(" at ") else { continue };
-        if !hash.starts_with("version-") || out.iter().any(|b: &KnownBuild| b.hash == hash) {
+        let Ok(hash) = crate::core::deployment::normalize_guid(hash) else { continue };
+        if out.iter().any(|b: &KnownBuild| b.hash == hash) {
             continue;
         }
         let (date, version) = match rest.split_once(", file version: ") {
             Some((date, version)) => (date, version),
             None => (rest, ""),
         };
-        let version = version.split("...").next().unwrap_or_default().replace(' ', "").replace(',', ".");
-        out.push(KnownBuild { kind: "History".into(), version, hash: hash.to_owned(), date: date.trim().to_owned() });
+        let version = version.split("...").next().unwrap_or_default();
+        let version = version.split(", git hash").next().unwrap_or_default().replace(' ', "").replace(',', ".");
+        out.push(KnownBuild { kind: "History".into(), version, hash, date: date.trim().to_owned() });
         if out.len() >= limit {
             break;
         }
@@ -738,13 +738,18 @@ fn parse_deploy_history(text: &str, limit: usize) -> Vec<KnownBuild> {
 mod history_tests {
     #[test]
     fn reads_deploy_history() {
-        let text = "New Studio64 version-aaa at 1/1/2024 1:00:00 PM, file version: 0, 600, 0, 1...Done!
-                    New WindowsPlayer version-bbb at 9/4/2024 5:28:45 PM, file version: 0, 641, 0, 6410693...Done!
+        let text = "New Studio64 version-aaaaaaaaaaaaaaaa at 1/1/2024 1:00:00 PM, file version: 0, 600, 0, 1...Done!
+                    New WindowsPlayer version-bbbbbbbbbbbbbbbb at 9/4/2024 5:28:45 PM, file version: 0, 641, 0, 6410693...Done!
+New WindowsPlayer version-d599f7fc52a8404c at 3/3/2026 5:15:45 PM, file version: 0, 711, 0, 7110875, git hash: 0.711.0.7110875 ...
+New WindowsPlayer version-hidden at 3/17/2026 9:12:14 AM, file version: 0, 713, 0, 7130910, git hash: 0.713.0.7130910 ...
 ";
         let builds = super::parse_deploy_history(text, 10);
-        assert_eq!(builds.len(), 1);
-        assert_eq!(builds[0].hash, "version-bbb");
-        assert_eq!(builds[0].version, "0.641.0.6410693");
+        assert_eq!(builds.len(), 2);
+        assert_eq!(builds[0].hash, "version-d599f7fc52a8404c");
+        assert_eq!(builds[0].version, "0.711.0.7110875");
+        assert_eq!(builds[0].date, "3/3/2026 5:15:45 PM");
+        assert_eq!(builds[1].hash, "version-bbbbbbbbbbbbbbbb");
+        assert_eq!(builds[1].version, "0.641.0.6410693");
     }
 }
 
@@ -788,6 +793,42 @@ pub async fn similar_games(universe_id: u64) -> Result<Vec<SuggestedGame>, Strin
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Roblox's own charts (Trending, then Top Playing Now), as on its home
+/// page, with no sign-in. Sponsored games are left out.
+pub async fn popular_games() -> Result<Vec<SuggestedGame>, String> {
+    let url = format!(
+        "https://apis.roblox.com/explore-api/v1/get-sorts?sessionId={}&device=computer&country=all",
+        uuid::Uuid::new_v4()
+    );
+    let body = get_json(&url).await?;
+    let mut out: Vec<SuggestedGame> = Vec::new();
+    for wanted in ["top-trending", "top-playing-now", "up-and-coming"] {
+        let Some(sort) = body["sorts"].as_array().into_iter().flatten().find(|s| s["sortId"].as_str() == Some(wanted)) else { continue };
+        for g in sort["games"].as_array().into_iter().flatten() {
+            if g["isSponsored"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let (Some(universe_id), Some(place_id), Some(name)) = (g["universeId"].as_u64(), g["rootPlaceId"].as_u64(), g["name"].as_str()) else { continue };
+            if out.iter().any(|o| o.universe_id == universe_id) {
+                continue;
+            }
+            out.push(SuggestedGame {
+                universe_id,
+                place_id,
+                name: name.trim().to_owned(),
+                creator: g["creatorName"].as_str().unwrap_or_default().to_owned(),
+                players: g["playerCount"].as_u64().unwrap_or(0),
+                up_votes: g["totalUpVotes"].as_u64().unwrap_or(0),
+                down_votes: g["totalDownVotes"].as_u64().unwrap_or(0),
+            });
+        }
+    }
+    if out.is_empty() {
+        return Err("Roblox didn't list any popular games.".into());
+    }
+    Ok(out)
 }
 
 /// A game found by name, with its icon (an image URL) when Roblox has one.

@@ -235,7 +235,13 @@
         <div class="section-header">
           <div class="col grow" style="gap: 1px">
             <h2 class="section-title">Recommended for you</h2>
-            <span class="meta">{library.accounts.length > 1 ? `Based on what your ${library.accounts.length} accounts play` : "Based on what you play"}</span>
+            <span class="meta">
+              {snap.recommendations.length && snap.recommendations.every((r) => r.because?.[0] === "Popular on Roblox")
+                ? "Popular on Roblox right now. Play a few games for picks based on what you like"
+                : library.accounts.length > 1
+                  ? `Based on what your ${library.accounts.length} accounts play`
+                  : "Based on what you play"}
+            </span>
           </div>
           <button class="btn tertiary" disabled={snap.recs_loading} onclick={() => run("refresh_recommendations")}>
             <Icon name="refresh" />{snap.recs_loading ? "Finding games…" : "Refresh"}

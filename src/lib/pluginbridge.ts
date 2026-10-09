@@ -8,7 +8,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { app, type Page } from "./state.svelte";
-import { handleLaunch, play, run } from "./api";
+import { handleLaunch, play, run, setPreferences } from "./api";
 import { icon } from "./icons";
 import type { LaunchOutcome } from "./types";
 
@@ -30,6 +30,9 @@ const LOCAL: Record<string, string> = {
   "app.invoke": "full",
   // Open to every plugin ("" = no permission needed).
   "ui.icons": "",
+  // A plugin's own panel in the in-game overlay.
+  "overlay.shown": "",
+  "overlay.show": "",
 };
 
 /** The address of a plugin's page or engine. Unlike `convertFileSrc`, which
@@ -125,6 +128,17 @@ export function bridge(plugin: () => BridgedPlugin | undefined, side: "page" | "
       case "app.invoke":
         // Full access: any of Pious's own commands.
         return invoke(String(args[0]), (args[1] ?? {}) as Record<string, unknown>);
+      case "overlay.shown": {
+        const widget = app.snap?.bootstrapper.preferences.overlay.widgets[`plugin:${p.id}`];
+        return !!app.snap?.plugins.find((x) => x.id === p.id)?.overlay && !(widget?.hidden ?? true);
+      }
+      case "overlay.show": {
+        if (!app.snap?.plugins.find((x) => x.id === p.id)?.overlay) throw new Error(`${p.name} has no overlay panel ("overlay" in its plugin.json).`);
+        const key = `plugin:${p.id}`;
+        const current = app.snap?.bootstrapper.preferences.overlay.widgets[key] ?? { x: 0.36, y: 0.06, pinned: false, hidden: true };
+        await setPreferences({ overlay: { widgets: { [key]: { ...current, hidden: !args[0] } } } });
+        return Boolean(args[0]);
+      }
       case "ui.icons": {
         const names = Array.isArray(args[0]) ? args[0].map(String).slice(0, 200) : [];
         return Object.fromEntries(names.map((name) => [name, icon(name)]));

@@ -16,7 +16,7 @@
   const isLatest = $derived(snap.latest?.hash === record.hash);
   const prefDefault = $derived(snap.bootstrapper.preferences.default_version);
   const isDefault = $derived(
-    (typeof prefDefault === "object" && prefDefault.Specific === record.hash) ||
+    (typeof prefDefault === "object" && "Specific" in prefDefault && prefDefault.Specific === record.hash) ||
       (prefDefault === "Latest" && snap.latest_installed === record.hash),
   );
   const managedBy = $derived(snap.bootstrappers.find((b) => b.version === record.hash)?.name);

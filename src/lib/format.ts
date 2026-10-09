@@ -97,6 +97,9 @@ export function versionLabel(snap: Snapshot, choice: VersionChoice): string {
   if (choice === "Latest") {
     return snap.latest_installed ? `Latest · ${versionTitle(snap, snap.latest_installed)}` : "Latest";
   }
+  if ("Profile" in choice) {
+    return `Profile · ${choice.Profile}`;
+  }
   const title = snap.version_titles[choice.Specific];
   return title ?? `${choice.Specific} (missing)`;
 }

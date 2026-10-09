@@ -1,9 +1,15 @@
-<!-- One version's notes from the changelog. -->
+<!-- One version's notes from the changelog, with its **bold** and `code`. -->
 <script lang="ts">
-  import type { Release } from "../lib/changelog";
+  import { spans, type Release } from "../lib/changelog";
 
   let { release }: { release: Release } = $props();
 </script>
+
+{#snippet line(text: string)}
+  {#each spans(text) as span, k (k)}
+    {#if span.kind === "bold"}<strong>{span.text}</strong>{:else if span.kind === "code"}<code>{span.text}</code>{:else}{span.text}{/if}
+  {/each}
+{/snippet}
 
 <div class="notes stagger">
   {#each release.blocks as block, i (i)}
@@ -11,10 +17,10 @@
       <h4>{block.text}</h4>
     {:else if block.kind === "list"}
       <ul>
-        {#each block.items as item, j (j)}<li>{item}</li>{/each}
+        {#each block.items as item, j (j)}<li>{@render line(item)}</li>{/each}
       </ul>
     {:else}
-      <p>{block.text}</p>
+      <p>{@render line(block.text)}</p>
     {/if}
   {/each}
 </div>
@@ -47,6 +53,17 @@
     font-size: 13px;
     line-height: 1.5;
     color: rgb(var(--muted));
+  }
+  strong {
+    font-weight: 600;
+    color: rgb(var(--text));
+  }
+  code {
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: rgb(var(--surface) / 0.08);
+    font: 12px ui-monospace, Consolas, monospace;
+    color: rgb(var(--text));
   }
   li::marker {
     color: rgb(var(--faint));

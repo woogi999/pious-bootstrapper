@@ -56,8 +56,15 @@ impl Service {
         let mut usage: Option<crate::core::procstats::Usage> = None;
         let figures = Arc::new(Mutex::new(ServerFigures::default()));
         let mut last_sent: Option<Reading> = None;
+        // The game's window and the processor share, looked up less often
+        // than the frame rate is sent.
+        let mut tick: u32 = 0;
+        let mut area: Option<(i32, i32, i32, i32)> = None;
+        let mut cpu: Option<f32> = None;
         loop {
-            tokio::time::sleep(Duration::from_millis(if shown { 1000 } else { 700 })).await;
+            // Every 0.3 s while it shows, so FPS keeps up with the game.
+            tokio::time::sleep(Duration::from_millis(if shown { 300 } else { 700 })).await;
+            tick = tick.wrapping_add(1);
             let (wanted, items, editing) = {
                 let s = self.read();
                 let o = &s.bootstrapper.preferences.stats_overlay;
@@ -84,8 +91,13 @@ impl Service {
             };
             let mut reading = Reading::default();
             if let Some(pid) = pid {
+                // Once a second is plenty for where the window is and what
+                // Roblox uses; the frame rate goes out every tick.
+                let slow_tick = tick % 3 == 1 || usage.as_ref().is_none_or(|u| u.pid() != pid);
                 if has("fps") {
-                    let area = tokio::task::spawn_blocking(move || process::window_of(pid).and_then(process::client_rect)).await.unwrap_or(None);
+                    if slow_tick || area.is_none() {
+                        area = tokio::task::spawn_blocking(move || process::window_of(pid).and_then(process::client_rect)).await.unwrap_or(None);
+                    }
                     let m = meter.get_or_insert_with(crate::core::fps::Meter::start);
                     m.watch(area);
                     reading.fps = area.map(|_| m.fps());
@@ -95,10 +107,14 @@ impl Service {
                 if has("cpu") || has("memory") {
                     if usage.as_ref().is_none_or(|u| u.pid() != pid) {
                         usage = Some(crate::core::procstats::Usage::new(pid));
+                        cpu = None;
                     }
-                    if let Some(u) = usage.as_mut() {
-                        reading.cpu = if has("cpu") { u.cpu() } else { None };
+                    if slow_tick {
+                        if let Some(u) = usage.as_mut() {
+                            cpu = if has("cpu") { u.cpu().or(cpu) } else { None };
+                        }
                     }
+                    reading.cpu = cpu;
                     reading.memory = if has("memory") { crate::core::procstats::memory(pid) } else { None };
                 }
                 // What Pious knows about this window's game.
@@ -251,7 +267,7 @@ impl Service {
     /// The overlay measured itself: fit the window to it.
     pub fn stats_overlay_resize(&self, width: f64, height: f64) {
         if let Some(window) = self.app().get_webview_window(STATS_WINDOW) {
-            let _ = window.set_size(tauri::LogicalSize::new(width.max(40.0), height.max(20.0)));
+            super::input::resize_anchored(&window, width.max(40.0), height.max(20.0));
         }
     }
 

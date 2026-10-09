@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Macros</title>
+    <!-- Pious's look (docs/PLUGIN-UI.md), then this panel's few extras. -->
+    <link rel="stylesheet" href="pious-ui.css" />
+    <style>
+      body {
+        padding: 0;
+      }
+      #panel {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .clicker,
+      .macro {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: var(--r-md);
+      }
+      .clicker {
+        background: rgb(var(--surface) / 0.05);
+      }
+      .macro:hover {
+        background: rgb(var(--surface) / 0.05);
+      }
+      .live {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #3ddc97;
+        animation: pulse 1.2s ease-in-out infinite;
+        flex: none;
+      }
+      .list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 0;
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="panel"><span class="meta">Starting Macros…</span></div>
+    <script src="pious-plugin.js"></script>
+    <script src="overlay.js"></script>
+  </body>
+</html>

@@ -6,6 +6,33 @@ section below as the release notes, and Pious shows it after updating.
 Write each version as a `## <version>` heading followed by the changes,
 newest version first.
 
+## 1.0.2
+
+### Fixed
+- **Updating from 1.0.0 failed** with a Windows error saying Pious couldn't restart to update. Pious Setup now starts however it's started and asks for administrator rights itself (if you say no, it still updates your own install).
+- **Games opened as the wrong account.** Roblox rolls out new builds a few accounts at a time, and Pious only checked the public build, so an account already given a newer one got an "out of date" client. Roblox then closed it, ran its own installer, and reopened the game signed in as whoever was signed in to Roblox's own app. Pious now checks the build each account is meant to run (asking Roblox directly, not its cache), installs it first, and also plays it when the version picked for a game is out of date. If Roblox still updates itself mid-launch, Pious says what happened and gets the update for the next Play.
+- **Games set to always use one account** now say so when they launch over the account picked in the sidebar, and where to change it.
+- **The input overlay's Done button was cut off** while moving it. It now sits in its own row under the keys.
+- **Statistics** are joined when Pious moves its data folder (an update could leave the old history behind).
+- **No recommendations** for new accounts or without accounts: Pious now shows what's popular on Roblox until it knows what you like.
+- **What's new** showed raw `**` and backticks instead of bold text and code.
+- **The keep-on-top pin** is back at the left of the title bar.
+- **Your data can't be reset by another Pious any more.** An older Pious (like one still installed, or one started by an AI app) could fail to read data saved by a newer one and start over with an empty library. Now Pious notes which version saved your data, and an older one never saves over it; if a Pious can't read your games or accounts, it leaves the file alone instead of saving an empty one. Copies of unreadable files get their own dated names, so one never replaces another.
+
+### New
+- **Always use the LIVE channel** (Settings → General): keeps every account on Roblox's public version, so an account Roblox picked to try a new version early isn't made to update before it can play.
+- **Mod maker** (Tweaks → Mods): recolor Roblox's interface (top bar, menus, chat, backpack, emotes, player list, voice chat, cursors, shift lock, loading screen, the logo) in one color or a gradient, with a live preview. Made from each Roblox version's own pictures, so it follows Roblox's updates.
+- **FPS updates every 0.3 seconds** in the game stats overlay (it's measured over the last second, so it stays steady).
+- **Plugins in the in-game overlay**: a plugin can add a panel (`"overlay"` in its plugin.json). **Macros** has one: run or stop your macros and the auto-clicker without leaving the game (turn it on from the Macros page, Settings → Overlay, or the overlay's **+** chips).
+- **A tidier in-game overlay**: panels line up in even columns (left, right, bottom, and plugins at the top), all the same width with the same spacing, and slide into place when one changes size. A panel you move or resize stays where you put it.
+
+### Fixed in overlays
+- **The stats overlay ran off the right side of the screen** when placed there. Overlays now grow toward the middle of the screen (left on the right half, up on the bottom half) and always stay on screen.
+
+### Changed
+- **FPS moved to the game stats overlay**; the keys overlay shows keys, mouse, clicks and keys per second. If you had FPS on there, it's turned on in the stats overlay for you.
+- The shift lock setting now says that games with their own shift lock (many battlegrounds games) keep their own crosshair.
+
 ## 1.0.1
 
 ### Fixed

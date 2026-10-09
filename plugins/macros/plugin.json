@@ -7,6 +7,14 @@
   "icon": "macros",
   "provides": "macros",
   "page": "index.html",
+  "overlay": "overlay.html",
   "main": "engine.js",
-  "permissions": ["read", "input", "hotkeys", "notify", "navigate", "run"]
+  "permissions": [
+    "read",
+    "input",
+    "hotkeys",
+    "notify",
+    "navigate",
+    "run"
+  ]
 }

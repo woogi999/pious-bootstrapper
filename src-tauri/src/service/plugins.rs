@@ -63,6 +63,8 @@ struct Manifest {
     description: String,
     /// An HTML page in the plugin's folder, shown in Pious.
     page: Option<String>,
+    /// A small HTML page shown as a panel in the in-game overlay.
+    overlay: Option<String>,
     /// A script that runs in the background while the plugin is on.
     main: Option<String>,
     /// One of Pious's icon names.
@@ -100,6 +102,8 @@ pub struct Plugin {
     pub description: String,
     /// The page file, when it has one.
     pub page: Option<PathBuf>,
+    /// Its panel for the in-game overlay, when it has one.
+    pub overlay: Option<PathBuf>,
     /// The engine script, when it has one (runs in the background).
     pub main: Option<PathBuf>,
     pub icon: String,
@@ -257,6 +261,7 @@ fn read_plugin(folder: PathBuf, enabled: &BTreeSet<String>) -> Plugin {
     // Pages and every other file must stay inside the plugin's own folder.
     let page = manifest.page.as_deref().and_then(|p| keep(&mut problem, inside(&folder, p).map_err(|_| "Its page is missing.".into())));
     let main = manifest.main.as_deref().and_then(|p| keep(&mut problem, inside(&folder, p).map_err(|_| "Its engine script is missing.".into())));
+    let overlay = manifest.overlay.as_deref().and_then(|p| keep(&mut problem, inside(&folder, p).map_err(|_| "Its overlay panel is missing.".into())));
     let provides = manifest.provides.filter(|f| FEATURES.contains(&f.as_str()));
     let mut brings = Vec::new();
 
@@ -327,6 +332,7 @@ fn read_plugin(folder: PathBuf, enabled: &BTreeSet<String>) -> Plugin {
         author: manifest.author,
         description: manifest.description,
         page,
+        overlay,
         main,
         icon: manifest.icon.unwrap_or_else(|| "puzzle".into()),
         permissions,
@@ -527,6 +533,8 @@ window.pious = {
   app: { invoke: (command, args = {}) => call("app.invoke", command, args) },
   ui: {
     css: (text) => call("ui.css", text),
+    /** This plugin's panel in the in-game overlay ("overlay" in plugin.json). */
+    overlay: { shown: () => call("overlay.shown"), show: (on) => call("overlay.show", on) },
     /** Pious's icons as SVG markup, by name: one, or a map of several. */
     icon: async (name) => (await call("ui.icons", [name]))[name] ?? "",
     icons: (names) => call("ui.icons", names),
@@ -534,6 +542,33 @@ window.pious = {
 };
 
 window.parent.postMessage({ pious: "ready" }, "*");
+
+// How tall the page's content is, so the in-game overlay can fit a plugin's
+// panel to it.
+let lastHeight = 0;
+let sizing = 0;
+function reportSize() {
+  sizing = 0;
+  if (!document.body) return;
+  let bottom = 0;
+  for (const el of document.body.children) {
+    if (el.tagName === "SCRIPT") continue;
+    bottom = Math.max(bottom, el.getBoundingClientRect().bottom + window.scrollY);
+  }
+  const height = Math.ceil(bottom);
+  if (height !== lastHeight) {
+    lastHeight = height;
+    window.parent.postMessage({ pious: "size", height }, "*");
+  }
+}
+function watchSize() {
+  const later = () => sizing || (sizing = requestAnimationFrame(reportSize));
+  new ResizeObserver(later).observe(document.body);
+  new MutationObserver(later).observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+  later();
+}
+if (document.body) watchSize();
+else document.addEventListener("DOMContentLoaded", watchSize);
 })();
 "#;
 
@@ -662,6 +697,7 @@ pub(crate) mod tests {
         assert_eq!(plugin.id, crate::core::model::MACROS_PLUGIN);
         assert_eq!(plugin.provides.as_deref(), Some("macros"));
         assert!(plugin.enabled && plugin.builtin);
+        assert!(plugin.overlay.as_ref().is_some_and(|o| o.ends_with("overlay.html")), "its in-game overlay panel");
         // The copy written for portable installs is the same file.
         assert!(serde_json::from_str::<Manifest>(MACROS_MANIFEST).is_ok());
     }
@@ -710,14 +746,14 @@ pub(crate) mod tests {
 /// each engine runs in.
 pub fn refresh_sdk() {
     for plugin in list(&BTreeSet::new()) {
-        if plugin.page.is_none() && plugin.main.is_none() {
+        if plugin.page.is_none() && plugin.main.is_none() && plugin.overlay.is_none() {
             continue;
         }
         let path = plugin.folder.join("pious-plugin.js");
         if std::fs::read_to_string(&path).ok().as_deref() != Some(SDK) {
             let _ = std::fs::write(path, SDK);
         }
-        if plugin.page.is_some() {
+        if plugin.page.is_some() || plugin.overlay.is_some() {
             let path = plugin.folder.join("pious-ui.css");
             // Its size first: reading it back is only needed when they match.
             let same = std::fs::metadata(&path).is_ok_and(|m| m.len() as usize == UI_CSS.len())

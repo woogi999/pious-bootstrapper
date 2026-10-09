@@ -1,5 +1,6 @@
-<!-- Settings → Overlay: the keys, mouse, CPS, KPS and FPS drawn over the
-     game, with when they show and everything about how they look. -->
+<!-- Settings → Overlay: the keys, mouse, CPS and KPS drawn over the game,
+     with when they show and everything about how they look. (FPS is in the
+     game stats overlay.) -->
 <script lang="ts">
   import { app } from "../lib/state.svelte";
   import { run, setPreferences } from "../lib/api";
@@ -192,14 +193,6 @@
   <div class="item">
     {@render setting("Clicks and keys per second", "CPS and KPS counters.")}
     <Switch on={o.show_rates} onchange={(show_rates) => setPreferences({ input_overlay: { show_rates } })} />
-  </div>
-  <hr class="divider" />
-  <div class="item">
-    {@render setting(
-      "Show FPS",
-      "The game's frame rate: the frames you actually see, counted from the screen, so it tops out at your monitor's refresh rate. Pick \"No keys\" above to show only the counters.",
-    )}
-    <Switch on={o.show_fps} onchange={(show_fps) => setPreferences({ input_overlay: { show_fps } })} />
   </div>
 </section>
 

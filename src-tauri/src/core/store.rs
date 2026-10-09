@@ -129,6 +129,9 @@ pub fn migrate() {
 /// pointing saved paths at the files' new places. Runs only when `new`
 /// doesn't already hold more saved data than `old`.
 fn relocate(old: &Path, new: &Path) {
+    // Statistics are history, not a choice between two copies: whatever
+    // happens below, the old folder's are joined to the new folder's.
+    join_stats(&old.join("stats.jsonl"), &new.join("stats.jsonl"));
     let current = new.join("bootstrapper.json");
     if current.is_file() && amount(&current) >= amount(&old.join("bootstrapper.json")) {
         return;
@@ -273,13 +276,30 @@ fn merge_into(from: &Path, to: &Path) {
         } else if entry.file_name() == "library.json" {
             let _ = std::fs::rename(&source, &target);
         } else if entry.file_name() == "stats.jsonl" {
-            // Both hold history: the old first.
-            if let (Ok(old), Ok(new)) = (std::fs::read(&source), std::fs::read(&target)) {
-                if std::fs::write(&target, [old, new].concat()).is_ok() {
-                    let _ = std::fs::remove_file(&source);
-                }
-            }
+            join_stats(&source, &target);
         }
+    }
+}
+
+/// Puts the statistics in `from` into `to` (both history: the older lines
+/// first, in time order), then removes `from`. Lines already in `to` aren't
+/// added twice. Nothing is removed unless the joined file was written.
+fn join_stats(from: &Path, to: &Path) {
+    let Ok(old) = std::fs::read_to_string(from) else { return };
+    let new = std::fs::read_to_string(to).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut lines: Vec<&str> = old.lines().chain(new.lines()).filter(|l| !l.trim().is_empty() && seen.insert(*l)).collect();
+    // By the time each line says it happened (lines without one keep their place).
+    let at = |line: &str| serde_json::from_str::<serde_json::Value>(line).ok().and_then(|v| v["at"].as_str().map(str::to_owned));
+    lines.sort_by_cached_key(|l| at(l).unwrap_or_default());
+    let mut text = lines.join("\n");
+    text.push('\n');
+    if let Some(parent) = to.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let partial = to.with_extension("jsonl.part");
+    if std::fs::write(&partial, text).is_ok() && std::fs::rename(&partial, to).is_ok() {
+        let _ = std::fs::remove_file(from);
     }
 }
 
@@ -306,8 +326,13 @@ pub fn artwork_dir() -> PathBuf {
     data_dir().join("cache").join("artwork")
 }
 
+/// `%LOCALAPPDATA%\Pious\Versions`, whatever the data folder is (builds are
+/// big and per-user). The `versions_dir` preference overrides it.
 pub fn default_versions_dir() -> PathBuf {
-    data_dir().join("Versions")
+    match dirs::data_local_dir() {
+        Some(local) => local.join("Pious").join("Versions"),
+        None => data_dir().join("Versions"),
+    }
 }
 
 /// Why the saved data couldn't be loaded.
@@ -328,6 +353,24 @@ pub struct LoadError {
 pub async fn load() -> Result<Bootstrapper, LoadError> {
     let path = data_file();
     match tokio::fs::read(&path).await {
+        // Saved by a newer Pious (after a downgrade, or an old copy still
+        // installed somewhere): show what reads, but never save over it, or
+        // whatever this one doesn't understand would be lost.
+        Ok(bytes) if newer_than_us(&bytes).is_some() => {
+            let newer = newer_than_us(&bytes).unwrap_or_default();
+            let data = serde_json::from_slice::<Bootstrapper>(&bytes)
+                .ok()
+                .or_else(|| serde_json::from_slice::<serde_json::Value>(&bytes).ok().map(|v| recover(v).0))
+                .unwrap_or_default();
+            Err(LoadError {
+                message: format!(
+                    "Your Pious data was saved by Pious {newer}, which is newer than this one ({}). Nothing will be saved here, so none of it is lost: update Pious, or use the newer copy.",
+                    crate::core::updater::CURRENT
+                ),
+                can_overwrite: false,
+                recovered: Some(Box::new(data)),
+            })
+        }
         Ok(bytes) => match serde_json::from_slice::<Bootstrapper>(&bytes) {
             Ok(data) => Ok(data),
             // Readable JSON with a bad part (a field from a newer or broken
@@ -335,9 +378,23 @@ pub async fn load() -> Result<Bootstrapper, LoadError> {
             // and say what was reset.
             Err(_) if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v| v.is_object()) => {
                 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-                let (data, dropped) = recover(value);
-                let backup = path.with_extension("corrupt.json");
+                let (data, dropped) = recover(value.clone());
+                let backup = backup_path(&path);
                 let backed_up = tokio::fs::copy(&path, &backup).await.is_ok();
+                // Every game or every account unreadable means the file is
+                // fine and this Pious is what can't read it: don't save over
+                // it with an empty library.
+                let lost_all = |key: &str, kept: usize| value[key].as_array().is_some_and(|list| !list.is_empty()) && kept == 0;
+                if lost_all("games", data.games.len()) || lost_all("accounts", data.accounts.len()) {
+                    return Err(LoadError {
+                        message: format!(
+                            "This Pious couldn't read your games or accounts, so it won't save anything over them. Update Pious; your data is untouched (a copy is at {}).",
+                            backup.display()
+                        ),
+                        can_overwrite: false,
+                        recovered: Some(Box::new(data)),
+                    });
+                }
                 Err(LoadError {
                     message: if backed_up {
                         format!(
@@ -358,7 +415,7 @@ pub async fn load() -> Result<Bootstrapper, LoadError> {
                 })
             }
             Err(error) => {
-                let backup = path.with_extension("corrupt.json");
+                let backup = backup_path(&path);
                 let backed_up = tokio::fs::copy(&path, &backup).await.is_ok();
                 Err(LoadError {
                     message: if backed_up {
@@ -382,6 +439,56 @@ pub async fn load() -> Result<Bootstrapper, LoadError> {
             can_overwrite: false,
             recovered: None,
         }),
+    }
+}
+
+/// Where an unreadable file is copied to: a new name each time
+/// (`bootstrapper.corrupt-20261009-191500.json`), so a later problem can
+/// never replace the copy of an earlier one.
+fn backup_path(path: &Path) -> PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut backup = path.with_extension(format!("corrupt-{stamp}.json"));
+    let mut n = 1;
+    while backup.exists() {
+        n += 1;
+        backup = path.with_extension(format!("corrupt-{stamp}-{n}.json"));
+    }
+    backup
+}
+
+/// The version that saved `bytes`, when it's newer than this Pious.
+fn newer_than_us(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let saved = value["saved_by"].as_str()?.to_owned();
+    let parse = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    let (theirs, ours) = (parse(&saved)?, parse(crate::core::updater::CURRENT)?);
+    (theirs > ours).then_some(saved)
+}
+
+#[cfg(test)]
+mod real_file {
+    /// Reads a real saved file (`PIOUS_CHECK_FILE`) the way Pious does and
+    /// says what doesn't read: `cargo test --bin pious -- --ignored reads_real_file --nocapture`.
+    #[test]
+    #[ignore]
+    fn reads_real_file() {
+        let path = std::env::var("PIOUS_CHECK_FILE").expect("PIOUS_CHECK_FILE");
+        let bytes = std::fs::read(&path).unwrap();
+        match serde_json::from_slice::<crate::core::model::Bootstrapper>(&bytes) {
+            Ok(data) => println!("reads fine: {} games, {} accounts", data.games.len(), data.accounts.len()),
+            Err(error) => {
+                println!("doesn't read: {error}");
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                for game in value["games"].as_array().into_iter().flatten().take(1) {
+                    println!("first game: {:?}", serde_json::from_value::<crate::core::model::Game>(game.clone()).err());
+                }
+                for account in value["accounts"].as_array().into_iter().flatten().take(1) {
+                    println!("first account: {:?}", serde_json::from_value::<crate::core::model::Account>(account.clone()).err());
+                }
+                let (data, dropped) = super::recover(value);
+                println!("recovered: {} games, {} accounts; dropped {dropped:?}", data.games.len(), data.accounts.len());
+            }
+        }
     }
 }
 
@@ -435,7 +542,8 @@ fn recover(value: serde_json::Value) -> (Bootstrapper, Vec<String>) {
 }
 
 /// Atomically writes the saved data to disk.
-pub async fn save(data: Bootstrapper) -> Result<(), String> {
+pub async fn save(mut data: Bootstrapper) -> Result<(), String> {
+    data.saved_by = crate::core::updater::CURRENT.to_owned();
     let path = data_file();
     let json = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
     write_atomic(&path, &json).await.map_err(|e| e.to_string())
@@ -576,6 +684,57 @@ mod tests {
         relocate(&old, &new);
         assert_eq!(amount(&new.join("bootstrapper.json")), 2);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn data_from_a_newer_pious_is_never_saved_over() {
+        let ours = crate::core::updater::CURRENT;
+        let newer = serde_json::json!({ "saved_by": "999.0.0", "games": [] }).to_string();
+        assert_eq!(newer_than_us(newer.as_bytes()).as_deref(), Some("999.0.0"));
+        for older in [format!(r#"{{ "saved_by": "{ours}" }}"#), r#"{ "saved_by": "0.1.0" }"#.into(), "{}".into(), r#"{ "saved_by": "" }"#.into()] {
+            assert_eq!(newer_than_us(older.as_bytes()), None, "{older}");
+        }
+        // Numbers compare as numbers (1.10.0 is newer than 1.9.0).
+        assert!(newer_than_us(br#"{ "saved_by": "1000.10.0" }"#).is_some());
+    }
+
+    #[test]
+    fn statistics_are_joined_when_data_moves() {
+        let root = std::env::temp_dir().join(format!("pious-stats-{}", uuid::Uuid::new_v4().simple()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("stats.jsonl"), "{\"at\":\"2026-01-01T00:00:00Z\",\"event\":\"launch\"}\n{\"at\":\"2026-02-01T00:00:00Z\",\"event\":\"session\",\"seconds\":60}\n").unwrap();
+        std::fs::write(new.join("stats.jsonl"), "{\"at\":\"2026-03-01T00:00:00Z\",\"event\":\"app_open\"}\n").unwrap();
+        // The new folder already has more data: the library stays, the
+        // history is still joined.
+        let library = serde_json::json!({ "games": [{}, {}] }).to_string();
+        std::fs::write(new.join("bootstrapper.json"), &library).unwrap();
+        std::fs::write(old.join("bootstrapper.json"), "{}").unwrap();
+        relocate(&old, &new);
+        let joined = std::fs::read_to_string(new.join("stats.jsonl")).unwrap();
+        let lines: Vec<&str> = joined.lines().collect();
+        assert_eq!(lines.len(), 3, "{joined}");
+        assert!(lines[0].contains("2026-01") && lines[2].contains("2026-03"), "oldest first");
+        assert!(!old.join("stats.jsonl").exists());
+        // Joining again adds nothing twice.
+        std::fs::write(old.join("stats.jsonl"), lines[0]).unwrap();
+        join_stats(&old.join("stats.jsonl"), &new.join("stats.jsonl"));
+        assert_eq!(std::fs::read_to_string(new.join("stats.jsonl")).unwrap().lines().count(), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backups_never_replace_each_other() {
+        let dir = std::env::temp_dir().join(format!("pious-backup-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bootstrapper.json");
+        let first = backup_path(&file);
+        std::fs::write(&first, "a").unwrap();
+        let second = backup_path(&file);
+        assert_ne!(first, second);
+        assert!(first.file_name().unwrap().to_string_lossy().starts_with("bootstrapper.corrupt-"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -60,6 +60,30 @@ the background, once. A failed update isn't retried for six hours. You're
 only told when it's done. (Pious also updates Roblox right before a game
 starts, as before.)
 
+Pious always resolves the public (LIVE) channel: an account's rollout
+channel is ignored, and the client is told it's on LIVE before each launch
+(the same registry value Roblox's installer and Bloxstrap use).
+
+## Choosing a version
+
+Every game Pious starts itself runs one build, picked in this order: the
+game's own version or **version profile** (a name pointing at a build
+GUID, `version_profiles` in `bootstrapper.json`), then the pinned build
+(`pinned_version_guid`), then the default version, then LIVE's current
+build. A chosen or pinned build is never checked online: if its folder in
+`%LOCALAPPDATA%\Pious\Versions\version-<GUID>` is complete it starts
+straight away, otherwise it's downloaded first. Every downloaded file is
+checked against Roblox's `rbxManifest.txt`, and an install with a missing or
+different file fails. Before each start Pious writes the GUID to the
+folder's `version.txt` and to `Software\Roblox\RobloxPlayer\Version` (under
+HKEY_CURRENT_USER, and under HKEY_LOCAL_MACHINE's WOW6432Node when a
+machine-wide Roblox install made that key).
+
+To go back to an older build, pick it in Versions → builds (Roblox's
+`DeployHistory.txt`; since March 2026 Roblox hides new builds' GUIDs
+there, so those come from weao.xyz) and choose it for a game, the default
+or a profile. Roblox's servers can turn away builds older than LIVE.
+
 ## Crash reports
 
 When Pious itself or a Roblox window it started crashes, Pious writes a
@@ -99,7 +123,7 @@ size, colors, and whether recordings show it.
 
 | Stat | Where it comes from |
 | --- | --- |
-| FPS | Frames the game's window showed in the last second |
+| FPS | Frames the game's window showed in the last second, updated every 0.3 seconds |
 | Ping | The server's average ping, as Roblox's public server list reports it. Roblox servers don't answer pings, so this is the server's own figure. Private servers aren't listed, so they show **Private** |
 | Players | Players in your server and its size (server list) |
 | Server FPS | How fast the server runs (server list) |

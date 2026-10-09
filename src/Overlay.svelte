@@ -26,6 +26,7 @@
   import ContextMenu from "./components/ContextMenu.svelte";
   import Icon from "./components/Icon.svelte";
   import ModalHost from "./components/ModalHost.svelte";
+  import PluginOverlayPanel from "./components/PluginOverlayPanel.svelte";
   import SearchPalette from "./components/SearchPalette.svelte";
   import Switch from "./components/Switch.svelte";
   import Toasts from "./components/Toasts.svelte";
@@ -139,19 +140,39 @@
   }
 
   // ── Panels ─────────────────────────────────────────────────────────────
+  // Until a panel is moved it's docked: stacked in a column with the
+  // others, all the same width, evenly spaced, whatever their heights.
+  // x says where (x >= 0 is a spot the user dragged it to, as a share of
+  // the screen).
+  const DOCK = { right: -1, left: -2, bottom: -3, top: -4 } as const;
+  const EDGE = 24;
+  const GAP = 12;
   const DEFAULTS: Record<string, Widget> = {
-    friends: { x: 0.015, y: 0.03, pinned: false, hidden: false },
-    servers: { x: 0.015, y: 0.46, pinned: false, hidden: false },
-    ingame: { x: 0.015, y: 0.76, pinned: false, hidden: false },
-    // x < 0: against the right edge (until moved).
-    bar: { x: -1, y: 0.03, pinned: false, hidden: false },
-    running: { x: -1, y: 0.14, pinned: false, hidden: false },
-    record: { x: -1, y: 0.42, pinned: false, hidden: false },
-    quick: { x: -1, y: 0.6, pinned: false, hidden: false },
-    media: { x: 0.36, y: 0.84, pinned: false, hidden: false },
+    friends: { x: DOCK.left, y: 0, pinned: false, hidden: false },
+    servers: { x: DOCK.left, y: 0, pinned: false, hidden: false },
+    ingame: { x: DOCK.left, y: 0, pinned: false, hidden: false },
+    bar: { x: DOCK.right, y: 0, pinned: false, hidden: false },
+    running: { x: DOCK.right, y: 0, pinned: false, hidden: false },
+    record: { x: DOCK.right, y: 0, pinned: false, hidden: false },
+    quick: { x: DOCK.right, y: 0, pinned: false, hidden: false },
+    media: { x: DOCK.bottom, y: 0, pinned: false, hidden: false },
   };
-  const ORDER = ["bar", "friends", "running", "servers", "record", "quick", "ingame", "media"];
-  const TITLES: Record<string, string> = {
+  // Where panels sat by default before docking: a panel still there was
+  // never moved, so it's docked now too.
+  const OLD_DEFAULTS: Record<string, { x: number; y: number }> = {
+    friends: { x: 0.015, y: 0.03 },
+    servers: { x: 0.015, y: 0.46 },
+    ingame: { x: 0.015, y: 0.76 },
+    media: { x: 0.36, y: 0.84 },
+  };
+  const BUILT_IN = ["bar", "friends", "running", "servers", "record", "quick", "ingame", "media"];
+
+  // Plugins' panels ("overlay" in their plugin.json): hidden until turned
+  // on (here, in Settings → Overlay, or by the plugin itself).
+  const pluginPanels = $derived((snap?.plugins ?? []).filter((p) => p.enabled && p.overlay));
+  const PLUGIN_DEFAULT: Widget = { x: DOCK.top, y: 0, pinned: false, hidden: true };
+  const ORDER = $derived([...BUILT_IN, ...pluginPanels.map((p) => `plugin:${p.id}`)]);
+  const TITLES = $derived<Record<string, string>>({
     friends: "Friends",
     servers: "Private servers",
     ingame: "In game",
@@ -159,7 +180,9 @@
     record: "Recording",
     quick: "Jump back in",
     media: "Now playing",
-  };
+    ...Object.fromEntries(pluginPanels.map((p) => [`plugin:${p.id}`, p.name])),
+  });
+  const pluginOf = (name: string) => (name.startsWith("plugin:") ? pluginPanels.find((p) => `plugin:${p.id}` === name) : undefined);
 
   // While a panel is moved or resized, and after, until the saved layout
   // catches up. Without this the panel jumps back to where it was for a
@@ -168,7 +191,15 @@
   let local = $state<Record<string, Partial<Widget>>>({});
 
   function saved(name: string): Widget {
-    return { ...DEFAULTS[name], ...(snap?.bootstrapper.preferences.overlay.widgets[name] ?? {}) };
+    const base = DEFAULTS[name] ?? PLUGIN_DEFAULT;
+    const stored = snap?.bootstrapper.preferences.overlay.widgets[name];
+    if (!stored) return base;
+    // Still at the old default spot (or the old right-edge one, x = -1, or a
+    // plugin's first spot): never moved, so docked.
+    const old = OLD_DEFAULTS[name] ?? (name.startsWith("plugin:") ? { x: 0.36, y: 0.06 } : null);
+    const unmoved = old ? Math.abs(stored.x - old.x) < 1e-3 && Math.abs(stored.y - old.y) < 1e-3 : false;
+    if (unmoved || (stored.x < 0 && base.x < 0 && !stored.width && !stored.height)) return { ...stored, x: base.x, y: base.y };
+    return { ...base, ...stored };
   }
   function widget(name: string): Widget {
     return { ...saved(name), ...(local[name] ?? {}) };
@@ -239,25 +270,58 @@
   function startResize(name: string, event: PointerEvent) {
     const panel = (event.currentTarget as HTMLElement).closest<HTMLElement>(".widget")!;
     const rect = panel.getBoundingClientRect();
-    // A panel against the right edge stays where it is while it grows.
+    // A docked panel stays where it is while it grows (it's undocked: its
+    // own size, its own spot).
     const x = rect.left / window.innerWidth;
+    const y = rect.top / window.innerHeight;
     track(event, name, (dx, dy) => ({
       x,
+      y,
       width: Math.round(Math.min(Math.max(rect.width + dx, 220), window.innerWidth - rect.left)),
       height: Math.round(Math.min(Math.max(rect.height + dy, 120), window.innerHeight - rect.top)),
     }));
   }
 
+  /** Each shown panel's height, measured, for stacking the docks. */
+  let heights = $state<Record<string, number>>({});
+
+  function visible(name: string): boolean {
+    return !widget(name).hidden && (name !== "media" || !!snap?.bootstrapper.preferences.overlay.media);
+  }
+
+  /** How far a docked panel sits from its dock's edge: the panels before it
+   *  in the same dock, plus a gap after each. */
+  function dockOffset(name: string): number {
+    const dock = widget(name).x;
+    let offset = EDGE;
+    for (const other of ORDER) {
+      if (other === name) break;
+      if (visible(other) && widget(other).x === dock) offset += (heights[other] ?? 0) + GAP;
+    }
+    return offset;
+  }
+
   function position(name: string): string {
     const w = widget(name);
     const size = `${w.width ? `width: ${w.width}px;` : ""}${w.height ? `height: ${w.height}px;` : ""}`;
-    if (w.x < 0) return `right: 1.5%; top: ${w.y * 100}%; ${size}`;
+    switch (w.x) {
+      case DOCK.left:
+        return `left: ${EDGE}px; top: ${dockOffset(name)}px;`;
+      case DOCK.right:
+        return `right: ${EDGE}px; top: ${dockOffset(name)}px;`;
+      case DOCK.bottom:
+        return `left: calc(50% - var(--wide) / 2); bottom: ${dockOffset(name)}px; width: var(--wide);`;
+      case DOCK.top:
+        return `left: calc(50% - var(--panel) / 2); top: ${dockOffset(name)}px;`;
+    }
     return `left: ${w.x * 100}%; top: ${w.y * 100}%; ${size}`;
   }
 
   function resetLayout() {
     local = {};
-    setPreferences({ overlay: { widgets: DEFAULTS } });
+    // Plugin panels go back to their spot but stay shown or hidden as they were.
+    const plugins = Object.fromEntries(pluginPanels.map((p) => [`plugin:${p.id}`, { ...PLUGIN_DEFAULT, hidden: saved(`plugin:${p.id}`).hidden }]));
+    setPreferences({ overlay: { widgets: { ...DEFAULTS, ...plugins } } });
   }
 
   // ── Content ────────────────────────────────────────────────────────────
@@ -414,14 +478,21 @@
     {#if snap && mode === "full"}
       {#each ORDER as name, i (name)}
         {@const w = widget(name)}
-        {#if !w.hidden && (name !== "media" || snap.bootstrapper.preferences.overlay.media)}
-          <div class="widget" class:dragging={moving === name} class:sized={!!w.height} style="{position(name)} --i: {i}">
+        {#if visible(name)}
+          <div
+            class="widget"
+            class:docked={w.x < 0}
+            class:dragging={moving === name}
+            class:sized={!!w.height}
+            style="{position(name)} --i: {i}"
+            bind:offsetHeight={heights[name]}
+          >
             {#if name === "bar"}
               <div class="glass-elevated bar" role="toolbar" tabindex="-1" class:grab={!w.pinned} onpointerdown={(e) => startDrag(name, e)}>
                 <span class="logo">{@html logo}</span>
                 <div class="col grow" style="gap: 0">
                   <span class="clock">{clock}</span>
-                  <span class="secondary line">{hotkey} or Esc to close</span>
+                  <span class="secondary line" title="{hotkey} or Esc closes the overlay">{hotkey} or Esc</span>
                 </div>
                 <button class="icon-btn" title="Search (Ctrl K)" aria-label="Search" onclick={() => (app.searchOpen = true)}><Icon name="search" /></button>
                 <button class="icon-btn" title="Open Pious" aria-label="Open Pious" onclick={() => (hide(), invoke("show_main"))}><Icon name="external" /></button>
@@ -571,6 +642,11 @@
                   {/each}
                 </div>
               </div>
+            {:else if pluginOf(name)}
+              <div class="glass-elevated panel-box plugin-box">
+                {@render head(name)}
+                <PluginOverlayPanel plugin={pluginOf(name)!} sized={!!w.height} />
+              </div>
             {:else if name === "media"}
               <div class="glass-elevated panel-box">
                 {@render head(name)}
@@ -692,6 +768,9 @@
   .stage {
     position: fixed;
     inset: 0;
+    /* Every panel the same width; the media player a little wider. */
+    --panel: min(340px, 24vw);
+    --wide: min(440px, 34vw);
   }
   .backdrop,
   .catcher {
@@ -729,13 +808,24 @@
   /* Panels rise in one after another, and settle back out. */
   .widget {
     position: absolute;
-    width: min(400px, 28vw);
+    width: var(--panel);
     opacity: 0;
     transform: translateY(14px) scale(0.98);
     transition:
       opacity 220ms ease,
       transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
     transition-delay: calc(var(--i) * 30ms);
+  }
+  /* Docked panels glide to their place when one above them changes size. */
+  .open .widget.docked:not(.dragging) {
+    transition:
+      opacity 220ms ease,
+      transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      top 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      bottom 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .widget > :global(.glass-elevated) {
+    width: 100%;
   }
   .open .widget {
     opacity: 1;
@@ -839,6 +929,11 @@
     gap: 8px;
     padding: 10px 12px 12px;
     background: rgb(var(--panel) / 0.96);
+  }
+  /* A plugin's panel fits its page (see PluginOverlayPanel) until resized. */
+  .sized .plugin-box {
+    width: auto;
+    height: 100%;
   }
   .head {
     display: flex;

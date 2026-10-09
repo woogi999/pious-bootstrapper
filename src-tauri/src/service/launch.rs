@@ -113,14 +113,9 @@ impl Service {
             }
 
             let version = library.resolve_version(&plan.version).cloned();
-            if version.is_none() && library.preferences.handle_roblox_links {
-                return Err(stop("Install a Roblox version in Versions first. Pious opens Roblox links itself now."));
-            }
-            if let (VersionChoice::Specific(hash), None) = (&plan.version, &version) {
-                return Err(stop(format!(
-                    "Version {hash} isn't installed. Pick another version or install it from Versions."
-                )));
-            }
+            // The build the operator chose (profile, game, pin), installed by
+            // the run path if it's missing; `None` is LIVE's current one.
+            let chosen = library.chosen_guid(&plan.version).map_err(stop)?;
 
             if !plan.force {
                 if let Some(running) = s.instances.iter().find(|i| i.account == Some(account.id)) {
@@ -151,13 +146,14 @@ impl Service {
                 .as_deref()
                 .and_then(|name| s.bootstrappers.iter().find(|b| b.name == name))
                 .map(|b| b.exe.clone());
+            // Pious starts the client itself (through `prepare_build`) unless
+            // a bootstrapper does, or Roblox's own handler does because
+            // nothing is installed, chosen, or meant to be handled by Pious.
+            let run_path = via.is_none() && (version.is_some() || chosen.is_some() || library.preferences.handle_roblox_links);
             // Pious's tweaks go on the build it starts itself, also when another
             // window runs that build (Roblox only reads these files as it
             // needs them; a file that's in use is reported, not skipped).
-            let tweaks = match (&via, &version) {
-                (None, Some(v)) => Some((v.path.clone(), library.preferences.tweaks.clone())),
-                _ => None,
-            };
+            let tweaks = run_path.then(|| (version.as_ref().map(|v| v.path.clone()).unwrap_or_default(), library.preferences.tweaks.clone()));
 
             let direct = match &plan.link {
                 Some(link) => Some(parse_server_link(link).ok_or_else(|| stop("That isn't a private server link."))?),
@@ -244,7 +240,7 @@ impl Service {
                 started: now,
                 status: InstanceStatus::Launching,
                 location: None,
-                via_handler: version.is_none() || via.is_some(),
+                via_handler: !run_path,
                 plan: Some(LaunchPlan { account: Some(account.id), ..plan.clone() }),
             });
             s.watches.insert(id, super::watch::Watch::new());
@@ -259,9 +255,22 @@ impl Service {
                     via: via.clone(),
                 },
                 id,
-                match (&via, s.bootstrapper.preferences.launch_via.as_deref()) {
-                    (Some(_), Some(through)) => format!("Launching {} as {} through {through}", game.name, account.label()),
-                    _ => format!("Launching {} as {}", game.name, account.label()),
+                {
+                    let mut message = match (&via, s.bootstrapper.preferences.launch_via.as_deref()) {
+                        (Some(_), Some(through)) => format!("Launching {} as {} through {through}", game.name, account.label()),
+                        _ => format!("Launching {} as {}", game.name, account.label()),
+                    };
+                    // Saved to this game, over the account picked in the
+                    // sidebar: say so, or it looks like the wrong account.
+                    let pinned = game.config.pin_account && game.config.account == Some(account.id) && plan.account == Some(account.id);
+                    let picked = s.bootstrapper.play_account().map(|a| a.id);
+                    if pinned && picked.is_some_and(|p| p != account.id) {
+                        message.push_str(&format!(
+                            ". This game is set to always play as {}: change that in its Launch Configuration, or use Play with… for one game.",
+                            account.label()
+                        ));
+                    }
+                    message
                 },
                 tweaks,
                 Extras {
@@ -271,13 +280,9 @@ impl Service {
                     placement,
                     settings_for,
                     behavior,
-                    follow_latest: via.is_none()
-                        && version.is_some()
-                        && match &plan.version {
-                            VersionChoice::Latest => true,
-                            VersionChoice::Default => !matches!(s.bootstrapper.preferences.default_version, VersionChoice::Specific(_)),
-                            VersionChoice::Specific(_) => false,
-                        },
+                    run_path,
+                    installed: version.as_ref().map(|v| (v.hash.clone(), v.path.clone())),
+                    chosen,
                 },
             ))
         });
@@ -293,20 +298,23 @@ impl Service {
         self.toast(Tone::Active, message);
         self.spawn(move |s| async move {
             let (mut request, mut tweaks) = (request, tweaks);
-            // Roblox moved on since this build: install the new one and play
-            // that (Roblox would otherwise update itself, without tweaks).
-            if extras.follow_latest {
-                if let Some(newer) = s.update_roblox_first().await {
-                    request.executable = Some(newer.executable());
-                    if let Some((build, _)) = tweaks.as_mut() {
-                        *build = newer.path.clone();
+            if extras.run_path {
+                let (guid, build) = match s.build_for_launch(extras.chosen.clone(), extras.installed.clone()).await {
+                    Ok(build) => build,
+                    Err(error) => {
+                        s.launched(id, Err(LaunchError::Other(error))).await;
+                        return;
                     }
-                    s.mutate(|st| {
-                        if let Some(instance) = st.instances.iter_mut().find(|i| i.id == id) {
-                            instance.version = Some(newer.hash.clone());
-                        }
-                    });
+                };
+                request.executable = Some(build.join("RobloxPlayerBeta.exe"));
+                if let Some((path, _)) = tweaks.as_mut() {
+                    *path = build;
                 }
+                s.mutate(|st| {
+                    if let Some(instance) = st.instances.iter_mut().find(|i| i.id == id) {
+                        instance.version = Some(guid);
+                    }
+                });
             }
             // Tweaks kept in Roblox's settings file (the frame rate cap…).
             let settings_tweaks = tweaks.as_ref().map(|(_, t)| t.clone());
@@ -339,6 +347,9 @@ impl Service {
             if let Some(choice) = extras.region.clone() {
                 s.pick_region_server(&choice, extras.account, extras.place_id, id, &mut request).await;
             }
+            // Tell the client it's on LIVE (the locked channel), so it doesn't
+            // update itself to the rollout channel Roblox put the account on.
+            let _ = tokio::task::spawn_blocking(crate::core::channel::force_live).await;
             let result = launcher::launch(request).await;
             if let (Ok(launched), Some(placement)) = (&result, extras.placement) {
                 if let Some(pid) = launched.pid {
@@ -363,18 +374,22 @@ impl Service {
         LaunchOutcome::Started
     }
 
-    /// Roblox's current build, installed first if it isn't yet. `None` when
-    /// the installed newest already is current, or it couldn't be checked
-    /// or installed (the game then starts with what's installed).
-    async fn update_roblox_first(self: &Shared) -> Option<crate::core::model::VersionRecord> {
-        let latest = tokio::time::timeout(std::time::Duration::from_secs(6), crate::core::roblox::latest_client_version()).await.ok()?.ok()?;
-        let installed = |s: &Shared| s.read().bootstrapper.version(&latest.hash).filter(|v| v.is_usable()).cloned();
-        if let Some(record) = installed(self) {
-            return Some(record);
+    /// `prepare_build`, except that with nothing chosen and LIVE's build out
+    /// of reach (offline…), the build already `installed` is played. The
+    /// error is for the user.
+    async fn build_for_launch(
+        self: &Shared,
+        chosen: Option<String>,
+        installed: Option<(String, std::path::PathBuf)>,
+    ) -> Result<(String, std::path::PathBuf), String> {
+        match (self.prepare_build(chosen.clone()).await, installed) {
+            (Ok(build), _) => Ok(build),
+            (Err(error), Some(installed)) if chosen.is_none() => {
+                self.toast(Tone::Caution, format!("{error} Playing the installed {} instead.", installed.0));
+                Ok(installed)
+            }
+            (Err(error), _) => Err(error),
         }
-        self.toast(Tone::Active, format!("Updating Roblox to {} first…", latest.version));
-        self.install_version(latest.hash.clone(), Some(latest.version.clone())).await;
-        installed(self)
     }
 
     async fn launched(self: &Shared, id: Uuid, result: Result<launcher::Launched, LaunchError>) {
@@ -400,6 +415,9 @@ impl Service {
                     }
                     return;
                 }
+                if let Some(pid) = launched.pid {
+                    self.watch_for_self_update(pid);
+                }
                 self.sync_presence().await;
             }
             Err(error) => {
@@ -416,6 +434,37 @@ impl Service {
                 self.toast(Tone::Negative, error.message().to_owned());
             }
         }
+    }
+
+    /// Roblox can still decide a build is out of date (a release a moment
+    /// ago): the client closes, Roblox's installer runs, and the game comes
+    /// back signed in as whoever is signed in to Roblox's own app, not the
+    /// account Pious started. If that happens within the first minute, say
+    /// what's going on and fetch the update, so the next Play is right.
+    fn watch_for_self_update(self: &Shared, pid: u32) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let (alive, installer) = tokio::task::spawn_blocking(move || {
+                    let installer = ["RobloxPlayerInstaller.exe", "RobloxPlayerLauncher.exe"].iter().any(|n| !process::pids_named(n).is_empty());
+                    (process::is_alive(pid), installer)
+                })
+                .await
+                .unwrap_or((true, false));
+                if alive {
+                    continue;
+                }
+                if installer {
+                    me.toast(
+                        Tone::Caution,
+                        "Roblox closed to update itself. When its installer reopens the game, it signs in with the account saved in Roblox's own app, not the one you picked. Close that window and press Play again: Pious is getting the update.",
+                    );
+                    let _ = me.prepare_build(None).await;
+                }
+                return;
+            }
+        });
     }
 
     // ── Instances ────────────────────────────────────────────────────────
@@ -681,10 +730,17 @@ impl Service {
         }
         // roblox.com's Play button: the browser's own session and ticket.
         if let Some(web) = WebLaunch::parse(&link) {
-            let version = self.read().bootstrapper.resolve_version(&VersionChoice::Default).cloned();
-            let Some(version) = version else {
-                self.toast(Tone::Negative, "Install a Roblox version in Versions so Pious can start games from roblox.com.");
-                return;
+            let (installed, chosen) = {
+                let s = self.read();
+                let installed = s.bootstrapper.resolve_version(&VersionChoice::Default).map(|v| (v.hash.clone(), v.path.clone()));
+                (installed, s.bootstrapper.chosen_guid(&VersionChoice::Default))
+            };
+            let chosen = match chosen {
+                Ok(chosen) => chosen,
+                Err(error) => {
+                    self.toast(Tone::Negative, error);
+                    return;
+                }
             };
             let Some(place) = web.place_id() else {
                 self.toast(Tone::Negative, "That Roblox link didn't say which game to open.");
@@ -705,7 +761,7 @@ impl Service {
                     game,
                     server: ServerChoice::Public,
                     job: web.job_id(),
-                    version: Some(version.hash.clone()),
+                    version: installed.as_ref().map(|(hash, _)| hash.clone()),
                     started: now,
                     status: InstanceStatus::Launching,
                     location: None,
@@ -717,12 +773,25 @@ impl Service {
                 process::set_multi_instance(s.bootstrapper.preferences.multi_instance);
             });
             self.toast(Tone::Active, "Starting Roblox from your browser");
+            let (guid, build) = match self.build_for_launch(chosen, installed).await {
+                Ok(build) => build,
+                Err(error) => {
+                    self.launched(id, Err(LaunchError::Other(error))).await;
+                    return;
+                }
+            };
+            self.mutate(|s| {
+                if let Some(instance) = s.instances.iter_mut().find(|i| i.id == id) {
+                    instance.version = Some(guid);
+                }
+            });
             // Tweaks go on games started from the website too (they used to
             // apply only to games started from Pious's library).
             let tweaks = self.read().bootstrapper.preferences.tweaks.clone();
-            self.apply_tweaks_to(version.path.clone(), tweaks.clone()).await;
+            self.apply_tweaks_to(build.clone(), tweaks.clone()).await;
             let _ = tokio::task::spawn_blocking(move || crate::core::tweaks::apply_settings(&tweaks, &crate::core::store::data_dir())).await;
-            let result = launcher::launch_web(web, version.executable()).await;
+            let _ = tokio::task::spawn_blocking(crate::core::channel::force_live).await;
+            let result = launcher::launch_web(web, build.join("RobloxPlayerBeta.exe")).await;
             self.launched(id, result).await;
             return;
         }
@@ -772,9 +841,13 @@ struct Extras {
     /// Whose Roblox settings to load (`Some(None)` = the PC's own).
     settings_for: Option<Option<Uuid>>,
     behavior: crate::core::model::LaunchBehavior,
-    /// Plays the newest Roblox: update it first, like bootstrappers, so
-    /// Roblox doesn't update itself into a build without the tweaks.
-    follow_latest: bool,
+    /// Pious starts the client itself, through `prepare_build`.
+    run_path: bool,
+    /// The installed build the choice resolved to (GUID, folder): played
+    /// when LIVE's build can't be reached.
+    installed: Option<(String, std::path::PathBuf)>,
+    /// The GUID the operator chose (profile, game, pin); `None` is LIVE's.
+    chosen: Option<String>,
 }
 
 impl Service {

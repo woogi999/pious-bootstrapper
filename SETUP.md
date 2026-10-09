@@ -82,9 +82,11 @@ it; later builds reuse the result.
 
 ### Pious Setup runs as administrator
 
-`installer/pious-setup.manifest` asks Windows for administrator rights, so
-Setup can close every Pious and Roblox process and replace files in use.
-Only release builds carry it (what `update_release.bat` and the workflow
-build); debug builds don't, so `cargo test` can run them.
-Pious starts it through ShellExecute ("runas"), and Setup opens Pious again
-through Explorer so Pious (and Roblox) never run as administrator.
+Setup starts as whoever starts it (`installer/pious-setup.manifest` says
+"asInvoker") and then asks Windows to run it again as administrator
+(`relaunch_elevated`), so it can close every Pious and Roblox process and
+replace files in use. Demanding administrator in the manifest instead
+would make Windows refuse Pious 1.0.0, which starts Setup the plain way
+("requires elevation"). It only asks when the signed-in account is an
+administrator, and carries on without if you say no. Setup opens Pious
+again through Explorer, so Pious (and Roblox) never run as administrator.

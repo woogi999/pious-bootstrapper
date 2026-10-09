@@ -61,7 +61,9 @@
   ]);
 
   const missingVersion = $derived(
-    typeof version === "object" ? !snap.usable_versions.includes(version.Specific) : !snap.default_version && !snap.latest_installed,
+    typeof version === "object"
+      ? "Specific" in version && !snap.usable_versions.includes(version.Specific)
+      : !snap.default_version && !snap.latest_installed,
   );
   const canConfirm = $derived(!!game && (!!account || edit) && !(typeof version === "object" && missingVersion));
 

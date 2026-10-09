@@ -8,14 +8,20 @@ use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc::Sender;
 
+use crate::core::deployment;
 use crate::core::model::{VersionRecord, VersionSource};
-use crate::core::roblox;
+use crate::core::{roblox, store};
 
 const CDN: &str = "https://setup.rbxcdn.com";
 
 /// Directories that may contain Roblox client builds, with their source.
 fn search_roots(pious_dir: &Path) -> Vec<(PathBuf, VersionSource)> {
     let mut roots = vec![(pious_dir.to_path_buf(), VersionSource::Pious)];
+    // Builds installed before the default moved to %LOCALAPPDATA%\Pious\Versions.
+    let legacy = store::data_dir().join("Versions");
+    if legacy != pious_dir {
+        roots.push((legacy, VersionSource::Pious));
+    }
     if let Some(local) = dirs::data_local_dir() {
         roots.push((local.join("Roblox").join("Versions"), VersionSource::Roblox));
         for strap in ["Bloxstrap", "Fishstrap", "Voidstrap"] {
@@ -120,10 +126,11 @@ fn parse_manifest(manifest: &str) -> Result<Vec<Package>, String> {
 /// Where each player package is extracted, relative to the version folder.
 fn package_destination(name: &str) -> Option<&'static str> {
     Some(match name {
-        "RobloxApp.zip" | "redist.zip" | "WebView2.zip" => "",
+        // rbxManifest.txt lists MicrosoftEdgeWebview2Setup.exe (the
+        // runtime installer's only file) at the root too.
+        "RobloxApp.zip" | "redist.zip" | "WebView2.zip" | "WebView2RuntimeInstaller.zip" => "",
         "shaders.zip" => "shaders/",
         "ssl.zip" => "ssl/",
-        "WebView2RuntimeInstaller.zip" => "WebView2RuntimeInstaller/",
         "content-avatar.zip" => "content/avatar/",
         "content-configs.zip" => "content/configs/",
         "content-fonts.zip" => "content/fonts/",
@@ -147,13 +154,9 @@ fn package_destination(name: &str) -> Option<&'static str> {
 const APP_SETTINGS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Settings>\r\n\t<ContentFolder>content</ContentFolder>\r\n\t<BaseUrl>http://www.roblox.com</BaseUrl>\r\n</Settings>\r\n";
 
 /// Downloads and installs a Roblox player build into `versions_dir`,
-/// reporting progress through `events`.
-pub async fn install(
-    hash: String,
-    version: Option<String>,
-    versions_dir: PathBuf,
-    mut events: Sender<InstallEvent>,
-) {
+/// reporting progress through `events`. Every file is checked against the
+/// build's rbxManifest.txt before the build is put in place.
+pub async fn install_from(hash: String, version: Option<String>, versions_dir: PathBuf, mut events: Sender<InstallEvent>) {
     let result = install_inner(&hash, version, &versions_dir, &mut events).await;
     if result.is_err() {
         let _ = tokio::fs::remove_dir_all(versions_dir.join(format!(".{hash}.partial"))).await;
@@ -177,15 +180,9 @@ async fn install_inner(
         })
         .await;
 
-    let response = http
-        .get(format!("{CDN}/{hash}-rbxPkgManifest.txt"))
-        .send()
-        .await
-        .map_err(roblox::network_error)?;
+    let response = http.get(format!("{CDN}/{hash}-rbxPkgManifest.txt")).send().await.map_err(roblox::network_error)?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Roblox doesn't offer {hash} for download. It may be too old or mistyped."
-        ));
+        return Err(format!("Roblox doesn't offer {hash} for download. It may be too old or mistyped."));
     }
     let manifest = response.text().await.map_err(roblox::network_error)?;
     let packages: Vec<Package> = parse_manifest(&manifest)?
@@ -249,10 +246,27 @@ async fn install_inner(
         .send(InstallEvent::Progress {
             downloaded: total,
             total,
-            stage: "Finishing up".into(),
+            stage: "Verifying files".into(),
         })
         .await;
 
+    let response = http.get(format!("{CDN}/{hash}-{}", deployment::FILE_MANIFEST)).send().await.map_err(roblox::network_error)?;
+    if !response.status().is_success() {
+        return Err(format!("Couldn't download {}'s file list ({}), so it can't be verified.", hash, response.status()));
+    }
+    let files = response.text().await.map_err(roblox::network_error)?;
+    let checked = staging.clone();
+    let files = tokio::task::spawn_blocking(move || deployment::verify(&checked, &files).map(|_| files))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{hash} is corrupt: {e:#}"))?;
+
+    tokio::fs::write(staging.join(deployment::FILE_MANIFEST), files)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::write(staging.join(deployment::VERSION_MARKER), hash)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::fs::write(staging.join("AppSettings.xml"), APP_SETTINGS)
         .await
         .map_err(|e| e.to_string())?;
@@ -323,5 +337,26 @@ mod tests {
         assert_eq!(packages[0].name, "RobloxApp.zip");
         assert_eq!(packages[0].checksum, "abcdef");
         assert_eq!(packages[1].size, 10);
+    }
+
+    /// Downloads and verifies LIVE's build (network, ~300 MB):
+    /// `cargo test --bin pious -- --ignored installs_and_verifies_live`.
+    #[tokio::test]
+    #[ignore]
+    async fn installs_and_verifies_live() {
+        use deployment::DeploymentResolver;
+        let live = deployment::LiveResolver.resolve(deployment::LOCKED_CHANNEL).await.expect("LIVE build");
+        let dir = std::env::temp_dir().join(format!("pious-install-{}", std::process::id()));
+        let (sender, mut events) = futures::channel::mpsc::channel(64);
+        tokio::spawn(install_from(live.version_guid.clone(), None, dir.clone(), sender));
+        let mut result = None;
+        while let Some(event) = events.next().await {
+            if let InstallEvent::Finished(r) = event {
+                result = Some(r);
+            }
+        }
+        let record = result.expect("finished").expect("installed");
+        assert!(deployment::is_complete(&record.path), "{}", record.path.display());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

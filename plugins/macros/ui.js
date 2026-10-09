@@ -1155,6 +1155,29 @@
     renderAll();
   }
 
+  // Whether Macros' panel shows in Pious's in-game overlay (null until known,
+  // or when this Pious can't show plugin panels).
+  let overlayShown = null;
+  async function loadOverlayShown() {
+    try {
+      overlayShown = await pious.ui.overlay.shown();
+    } catch {
+      overlayShown = null;
+    }
+    if (recSettingsEl && recSettingsEl.isConnected) renderRecSettings();
+  }
+  async function setOverlayShown(on) {
+    overlayShown = on;
+    renderRecSettings();
+    try {
+      await pious.ui.overlay.show(on);
+    } catch (e) {
+      overlayShown = !on;
+      renderRecSettings();
+      say(String(e?.message ?? e), true);
+    }
+  }
+
   function renderRecSettings() {
     fill(
       recSettingsEl,
@@ -1165,6 +1188,16 @@
         settingRow("Keep the timing", "Wait between actions as long as you did.", toggle(S.settings.record_timing, (record_timing) => setSetting({ record_timing }))),
         settingRow("Record pointer movement", "Every move, not just where clicks happen. Makes bigger macros.", toggle(S.settings.record_moves, (record_moves) => setSetting({ record_moves }))),
       ),
+      overlayShown === null
+        ? null
+        : group(
+            "In-game overlay",
+            settingRow(
+              "Show in the in-game overlay",
+              "A Macros panel in Pious's in-game overlay: run or stop your macros and the auto-clicker without leaving the game.",
+              toggle(overlayShown, setOverlayShown),
+            ),
+          ),
     );
   }
   let runBtn = null;
@@ -1467,6 +1500,8 @@
       }
     })
     .catch(() => {});
+
+  loadOverlayShown();
 
   // Ask until the engine answers (it may still be starting).
   let asks = 0;

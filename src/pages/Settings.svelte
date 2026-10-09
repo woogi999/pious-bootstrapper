@@ -387,7 +387,7 @@
           </div>
           <hr class="divider" />
           <div class="item">
-            {@render setting("Keep on top", "Pin Pious above other windows. Also the pin button in the title bar (Ctrl T).")}
+            {@render setting("Keep on top", "Pin Pious above other windows. Also the pin at the left of the title bar (Ctrl T).")}
             <Switch on={prefs.pinned} onchange={(on) => setPreferences({ pinned: on })} />
           </div>
           <hr class="divider" />
@@ -784,10 +784,19 @@
             {@render setting("Media controls", "A panel in the overlay for what's playing on your PC, like Spotify or a YouTube video: play, pause, skip and go back.")}
             <Switch on={prefs.overlay.media} onchange={(on) => setPreferences({ overlay: { media: on } })} />
           </div>
+          {#each snap.plugins.filter((p) => p.enabled && p.overlay) as plugin (plugin.id)}
+            {@const key = `plugin:${plugin.id}`}
+            {@const widget = prefs.overlay.widgets[key] ?? { x: 0.36, y: 0.06, pinned: false, hidden: true }}
+            <hr class="divider" />
+            <div class="item" class:off={!prefs.overlay.enabled}>
+              {@render setting(`${plugin.name} panel`, `A panel from the ${plugin.name} plugin in the overlay.`)}
+              <Switch on={!widget.hidden} onchange={(on) => setPreferences({ overlay: { widgets: { [key]: { ...widget, hidden: !on } } } })} />
+            </div>
+          {/each}
         </section>
         <span class="label">Game stats on screen</span>
         <StatsOverlaySettings />
-        <span class="label">Keys, mouse and FPS on screen</span>
+        <span class="label">Keys and mouse on screen</span>
         <InputOverlaySettings />
       {:else if app.settingsTab === "recording"}
         {#if !status.installed}

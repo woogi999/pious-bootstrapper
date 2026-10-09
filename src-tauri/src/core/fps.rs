@@ -126,8 +126,12 @@ mod imp {
     /// Counts frames that changed the game's part of the screen, until the
     /// game moves to another screen, the watch is lost or it's stopped.
     fn watch(duplication: &IDXGIOutputDuplication, screen: RECT, stop: &AtomicBool, fps: &AtomicU32, area: &dyn Fn() -> Option<Area>) {
-        let mut frames = 0u32;
-        let mut since = Instant::now();
+        // Frames seen, by when: the rate is the frames of the last second,
+        // worked out again every tenth of a second (steady, yet quick to
+        // follow a change).
+        let mut seen: std::collections::VecDeque<(Instant, u32)> = std::collections::VecDeque::new();
+        let started = Instant::now();
+        let mut published = Instant::now();
         let mut rects: Vec<RECT> = vec![RECT::default(); 64];
         while !stop.load(Ordering::Relaxed) {
             let Some(game) = area() else { return };
@@ -160,7 +164,7 @@ mod imp {
                             }
                         };
                         if changed {
-                            frames += info.AccumulatedFrames.max(1);
+                            seen.push_back((Instant::now(), info.AccumulatedFrames.max(1)));
                         }
                     }
                     drop(resource);
@@ -171,11 +175,16 @@ mod imp {
                 // screen): start over.
                 Err(_) => return,
             }
-            let elapsed = since.elapsed();
-            if elapsed >= Duration::from_millis(500) {
-                fps.store((frames as f64 / elapsed.as_secs_f64()).round() as u32, Ordering::Relaxed);
-                frames = 0;
-                since = Instant::now();
+            if published.elapsed() >= Duration::from_millis(100) {
+                published = Instant::now();
+                let window = Duration::from_secs(1);
+                while seen.front().is_some_and(|(at, _)| at.elapsed() > window) {
+                    seen.pop_front();
+                }
+                let frames: u32 = seen.iter().map(|(_, n)| n).sum();
+                // Less than a second watched so far: scale up what there is.
+                let span = started.elapsed().min(window).as_secs_f64().max(0.1);
+                fps.store((frames as f64 / span).round() as u32, Ordering::Relaxed);
             }
         }
     }

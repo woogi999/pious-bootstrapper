@@ -4,7 +4,7 @@
 export type Uuid = string;
 export type Timestamp = string;
 
-export type VersionChoice = "Default" | "Latest" | { Specific: string };
+export type VersionChoice = "Default" | "Latest" | { Specific: string } | { Profile: string };
 export type ServerChoice = "Public" | { Private: Uuid };
 
 export interface LaunchConfig {
@@ -176,6 +176,9 @@ export interface Preferences {
   emoji_shortcodes: { in_app: boolean; in_roblox: boolean };
   taskbar: { flash: boolean; badge: boolean; progress: boolean };
   auto_update_roblox: boolean;
+  pinned_version_guid: string | null;
+  locked_channel: string;
+  version_profiles: Record<string, string>;
   crash_reports: boolean;
   region: string;
   arrange_layout: string;
@@ -223,7 +226,6 @@ export interface InputOverlay {
   show_mouse: boolean;
   show_scroll: boolean;
   show_rates: boolean;
-  show_fps: boolean;
   x: number;
   y: number;
   scale: number;
@@ -362,6 +364,8 @@ export interface Plugin {
   author: string;
   description: string;
   page: string | null;
+  /** Its panel in the in-game overlay, when it has one. */
+  overlay: string | null;
   icon: string;
   permissions: string[];
   enabled: boolean;
@@ -619,6 +623,17 @@ export interface Tweaks {
   skybox_folder: string | null;
   /** "default", "power_saving", "high_performance", "adapter:<n>" or null. */
   gpu: string | null;
+  /** The mod maker: Roblox's interface recolored. */
+  ui_mod: UiMod;
+}
+
+export interface UiMod {
+  enabled: boolean;
+  parts: string[];
+  /** One color, or two for a gradient. */
+  colors: string[];
+  angle: number;
+  keep_shading: boolean;
 }
 
 export type EmojiStyle =

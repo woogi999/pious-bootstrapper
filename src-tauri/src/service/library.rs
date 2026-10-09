@@ -401,10 +401,8 @@ impl Service {
             let exclude: HashSet<u64> = s.bootstrapper.games.iter().filter_map(|g| g.universe_id).collect();
             (accounts, exclude)
         };
-        if seeds.is_empty() && accounts.is_empty() {
-            self.mutate(|s| s.recommendations.clear());
-            return;
-        }
+        // Nothing to go on (no accounts, nothing played) still gets
+        // recommendations: what's popular on Roblox (see below).
         self.mutate(|s| {
             s.recs_loading = true;
             s.recs_error = None;
@@ -436,7 +434,12 @@ impl Service {
             }
         }
 
-        let result = recommend::recommend(seeds.into_values().collect(), exclude, 60).await;
+        let result = match recommend::recommend(seeds.into_values().collect(), exclude.clone(), 60).await {
+            // Nothing personal to suggest yet (a new account, no history):
+            // Roblox's own charts instead of an empty row.
+            Ok(recs) if recs.is_empty() => recommend::popular(exclude, 60).await,
+            other => other,
+        };
         self.mutate(|s| {
             s.recs_loading = false;
             match result {
