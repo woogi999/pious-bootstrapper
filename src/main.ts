@@ -6,7 +6,9 @@ import Overlay from "./Overlay.svelte";
 import ChatWindow from "./ChatWindow.svelte";
 import EmojiPopup from "./EmojiPopup.svelte";
 import InputOverlay from "./InputOverlay.svelte";
+import StatsOverlay from "./StatsOverlay.svelte";
 import Notify from "./Notify.svelte";
+import PluginHost from "./PluginHost.svelte";
 import Splash from "./components/Splash.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
@@ -26,7 +28,7 @@ window.addEventListener("contextmenu", (event) => {
 // The same interface runs in the main window, the in-game overlay, the
 // notices over the game, the chat window, the pop-ups and the startup logo.
 const label = getCurrentWindow().label;
-if (!["hud", "splash", "inputs", "emoji", "notify"].includes(label)) trackShine();
-const roots = { overlay: Overlay, hud: Hud, chat: ChatWindow, splash: Splash, inputs: InputOverlay, emoji: EmojiPopup, notify: Notify } as Record<string, typeof App>;
+if (!["hud", "splash", "inputs", "stats", "emoji", "notify", "plugin-host"].includes(label)) trackShine();
+const roots = { overlay: Overlay, hud: Hud, chat: ChatWindow, splash: Splash, inputs: InputOverlay, stats: StatsOverlay, emoji: EmojiPopup, notify: Notify, "plugin-host": PluginHost } as Record<string, typeof App>;
 const root = roots[label] ?? App;
 export default mount(root, { target: document.getElementById("app")! });

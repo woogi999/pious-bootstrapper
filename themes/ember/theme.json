@@ -1,0 +1,17 @@
+{
+  "id": "ember",
+  "name": "Ember",
+  "version": "1.0.0",
+  "author": "Pious",
+  "description": "Warm charcoal with an orange glow and square-ish corners.",
+  "colors": {
+    "accent": "#FF8A3D",
+    "accent_2": "#FFC857",
+    "background": "#0F0B09",
+    "surface": "#FFE6D5",
+    "text": "#F6EDE6"
+  },
+  "gradient": { "from": "#3A1A0B", "to": "#0F0B09", "angle": 200, "opacity": 0.7 },
+  "radius": 0.5,
+  "glass": 1.1
+}

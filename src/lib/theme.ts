@@ -3,7 +3,10 @@
 // text are the text color mixed toward the background, and the accent
 // gets a readable ink color.
 
-import type { Appearance } from "./types";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { Appearance, UiAssets } from "./types";
+import { overrides } from "./overrides.svelte";
 
 type RGB = [number, number, number];
 
@@ -89,5 +92,48 @@ export function applyAppearance(look: Appearance, reduceMotion: boolean, searchB
   root.setProperty("--image-dim", String(Math.min(1, Math.max(0, look.image_dim))));
   root.setProperty("--image-blur", `${Math.round(look.image_blur * 40)}px`);
   root.setProperty("--search-blur", String(Math.min(1, Math.max(0, searchBlur))));
+  // Themes and Settings → Appearance: font, roundness, text size, a second
+  // accent and a gradient over the background.
+  root.setProperty("--ui-font", look.font?.trim() ? cssFont(look.font) : "Manrope");
+  root.setProperty("--radius", String(Math.min(2.5, Math.max(0, look.radius ?? 1))));
+  root.setProperty("--font-scale", String(Math.min(1.3, Math.max(0.8, look.font_scale ?? 1))));
+  const second = parseHex(look.accent_2 ?? "");
+  root.setProperty("--accent-2", second ? css(second) : css(accent));
+  const g = look.gradient;
+  const from = g && parseHex(g.from);
+  const to = g && parseHex(g.to);
+  root.setProperty("--gradient", g?.enabled && from && to ? `linear-gradient(${g.angle}deg, rgb(${css(from)}), rgb(${css(to)}))` : "none");
+  root.setProperty("--gradient-opacity", String(Math.min(1, Math.max(0, g?.opacity ?? 0.6))));
   document.documentElement.classList.toggle("reduce-motion", reduceMotion);
+}
+
+/** A font family name, quoted for CSS (names come from themes and the PC). */
+function cssFont(name: string): string {
+  return '"' + name.replace(/["\\;{}<>]/g, "") + '"';
+}
+
+// ── Plugins' and themes' extras ──────────────────────────────────────────
+
+
+/** Applies plugins' and the theme's stylesheets, icons, sounds and font,
+ * now and whenever they change. Returns a function that stops following. */
+export function followUiAssets(): () => void {
+  const apply = (a: UiAssets) => {
+    let style = document.getElementById("pious-ui-assets") as HTMLStyleElement | null;
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "pious-ui-assets";
+      document.head.appendChild(style);
+    }
+    const font = a.font ? `@font-face { font-family: ${cssFont(a.font[0])}; src: url("${convertFileSrc(a.font[1])}"); }\n` : "";
+    // Only styles: a stylesheet can't run code.
+    style.textContent = font + a.css.join("\n");
+    overrides.icons = Object.fromEntries(Object.entries(a.icons).map(([name, file]) => [name, convertFileSrc(file)]));
+    overrides.sounds = Object.fromEntries(Object.entries(a.sounds).map(([name, file]) => [name, convertFileSrc(file)]));
+  };
+  invoke<UiAssets>("ui_assets").then(apply).catch(() => {});
+  const off = listen<UiAssets>("ui-assets", (e) => apply(e.payload));
+  return () => {
+    off.then((f) => f());
+  };
 }

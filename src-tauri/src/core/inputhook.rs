@@ -25,21 +25,21 @@ pub struct Config {
     pub remaps: HashMap<u32, HashMap<String, String>>,
     /// Turn :shortcodes: typed in these Roblox processes into emoji.
     pub emoji: HashSet<u32>,
-    /// Keep track of the real mouse buttons (for the auto-clicker modes
-    /// that follow your mouse).
-    pub buttons: bool,
     /// Pious's own hotkeys (keys like "Shift+F8", and an ID), caught here
     /// while one of `hotkey_pids` is in front and kept from the game. A
     /// Windows hotkey can't do that for every key: F12 is often taken (it's
     /// reserved for debuggers), and Roblox would still see the key.
     pub hotkeys: Vec<(String, u32)>,
     pub hotkey_pids: HashSet<u32>,
+    /// Tell Pious about every real key and mouse button (for plugins that
+    /// follow them, like the auto-clicker's "while you hold the mouse").
+    pub forward: bool,
 }
 
 impl Config {
     fn wanted(&self) -> bool {
         self.watch
-            || self.buttons
+            || self.forward
             || self.remaps.values().any(|r| !r.is_empty())
             || !self.emoji.is_empty()
             || (!self.hotkeys.is_empty() && !self.hotkey_pids.is_empty())
@@ -55,6 +55,8 @@ pub enum Event {
     EmojiHide,
     /// One of Pious's hotkeys was pressed (or let go) in a game.
     Hotkey { id: u32, pressed: bool },
+    /// A real key or mouse button went down or up (with `forward`).
+    Input { code: &'static str, down: bool },
 }
 
 /// Jobs for the worker thread (things too slow for the hook itself).
@@ -78,33 +80,6 @@ static WHEEL_UP: AtomicU64 = AtomicU64::new(0);
 static WHEEL_DOWN: AtomicU64 = AtomicU64::new(0);
 /// What's held down, by name.
 static HELD: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-/// The real mouse buttons (never Pious's own clicks): which are down, and
-/// how many times each was pressed. Left, right, middle, back, forward.
-const BUTTONS: [&str; 5] = ["MouseLeft", "MouseRight", "MouseMiddle", "MouseBack", "MouseForward"];
-static BUTTONS_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static BUTTON_PRESSES: [AtomicU64; 5] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
-
-/// Whether a mouse button ("MouseLeft"…) is held down by hand right now.
-pub fn physically_down(button: &str) -> bool {
-    BUTTONS.iter().position(|b| *b == button).is_some_and(|i| BUTTONS_DOWN.load(Ordering::Relaxed) & (1 << i) != 0)
-}
-
-/// How many times a mouse button has been pressed by hand.
-pub fn presses(button: &str) -> u64 {
-    BUTTONS.iter().position(|b| *b == button).map(|i| BUTTON_PRESSES[i].load(Ordering::Relaxed)).unwrap_or(0)
-}
-
-fn track_button(code: &str, down: bool) {
-    let Some(i) = BUTTONS.iter().position(|b| *b == code) else { return };
-    if down {
-        if BUTTONS_DOWN.fetch_or(1 << i, Ordering::Relaxed) & (1 << i) == 0 {
-            BUTTON_PRESSES[i].fetch_add(1, Ordering::Relaxed);
-        }
-    } else {
-        BUTTONS_DOWN.fetch_and(!(1 << i), Ordering::Relaxed);
-    }
-}
-/// Keys whose press was remapped, and what they pressed instead, so their
 /// release is remapped too (even if Roblox lost focus in between).
 static REMAPPED: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
 /// Keys held down that started a hotkey: (key, hotkey ID). Their repeats
@@ -262,9 +237,7 @@ fn worker(jobs: Receiver<Job>) {
                     automation::press("Backspace", true);
                     automation::press("Backspace", false);
                 }
-                for c in text.chars() {
-                    automation::type_char(c);
-                }
+                automation::type_text(&text);
             }
         }
     }
@@ -292,7 +265,9 @@ fn set_held(code: &'static str, down: bool) {
 /// A key or button went down or up physically. Returns true to swallow
 /// it (it was remapped).
 fn on_input(code: &'static str, down: bool, pid: u32, config: &Config) -> bool {
-    track_button(code, down);
+    if config.forward {
+        emit(Event::Input { code, down });
+    }
     if !code.starts_with("Mouse") && on_hotkey(code, down, pid, config) {
         return true;
     }
@@ -402,13 +377,15 @@ fn on_typing(vk: u16, typed: Option<char>, pid: u32) -> bool {
     }
     match (vk, typed) {
         (_, Some(':')) => {
-            // The closing colon of a full shortcode: swap it for the emoji
-            // (the colon itself goes through first, then everything is erased).
+            // The closing colon of a full shortcode: it's kept from Roblox
+            // (so Roblox's own shortcodes don't act on it too), and what's
+            // typed so far (":sob") is swapped for the emoji. Letting the
+            // colon through and erasing it raced with Roblox receiving it.
             if typing.active {
                 if let Some(emoji) = crate::core::emoji::exact(&typing.query) {
-                    job(Job::Replace { erase: typing.query.chars().count() + 2, text: emoji.to_owned() });
+                    job(Job::Replace { erase: typing.query.chars().count() + 1, text: emoji.to_owned() });
                     reset(&mut typing);
-                    return false;
+                    return true;
                 }
             }
             reset(&mut typing);

@@ -1,0 +1,18 @@
+{
+  "id": "midnight",
+  "name": "Midnight",
+  "version": "1.0.0",
+  "author": "Pious",
+  "description": "Deep blue glass with a violet glow.",
+  "colors": {
+    "accent": "#8B7CFF",
+    "accent_2": "#4FD1C5",
+    "background": "#07070F",
+    "surface": "#C9C8FF",
+    "text": "#ECEBFF"
+  },
+  "gradient": { "from": "#241A5C", "to": "#07070F", "angle": 160, "opacity": 0.85 },
+  "radius": 1.15,
+  "glass": 1.25,
+  "css": "theme.css"
+}

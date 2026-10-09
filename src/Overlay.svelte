@@ -18,7 +18,7 @@
   import { accountLabel, artworkKey, avatarKey, relative, runtime, who } from "./lib/format";
   import { keyLabel, matches } from "./lib/keys";
   import { handleShortcut } from "./lib/shortcuts";
-  import { applyAppearance } from "./lib/theme";
+  import { applyAppearance, followUiAssets } from "./lib/theme";
   import type { Friend, LaunchOutcome, NowPlaying, SearchHit, Widget } from "./lib/types";
   import Artwork from "./components/Artwork.svelte";
   import Avatar from "./components/Avatar.svelte";
@@ -66,6 +66,8 @@
 
   onMount(() => {
     connect();
+    // Plugins' and the theme's styles and icons here too.
+    followUiAssets();
     // Launches close the overlay once they've started, not before: a "Join
     // anyway?" question has to stay up until it's answered.
     launchHooks.started = () => {
@@ -73,11 +75,13 @@
       hide();
     };
     const timer = setInterval(() => (now = Date.now()), 1000);
-    const offShow = listen<{ backdrop: string | null; blur: number; dim: number; mode: "full" | "clip"; clip_max: number | null }>(
-      "overlay-show",
-      async (event) => {
+    type Show = { backdrop: string | null; blur: number; dim: number; mode: "full" | "clip"; clip_max: number | null };
+    const offShow = listen<Show>("overlay-show", (event) => onShow(event.payload));
+    // Opened before this page had loaded (the window was just made): the
+    // "overlay-show" that opened it came too early, so ask for it.
+    offShow.then(() => invoke<Show | null>("overlay_pending").then((p) => p && onShow(p)).catch(() => {}));
+    async function onShow(p: Show) {
         clearTimeout(hideTimer);
-        const p = event.payload;
         blur = p.blur;
         dim = p.dim;
         mode = p.mode ?? "full";
@@ -97,8 +101,7 @@
         await tick();
         requestAnimationFrame(() => requestAnimationFrame(() => (open = true)));
         if (mode === "clip" && p.clip_max) prompt(p.clip_max);
-      },
-    );
+    }
     const offPrompt = listen<number>("clip-prompt", (event) => prompt(event.payload));
     const offHide = listen("overlay-hide", () => {
       open = false;

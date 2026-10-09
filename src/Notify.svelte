@@ -9,7 +9,8 @@
   import { app, connect } from "./lib/state.svelte";
   import { run } from "./lib/api";
   import { who } from "./lib/format";
-  import { applyAppearance } from "./lib/theme";
+  import { applyAppearance, followUiAssets } from "./lib/theme";
+  import { overrides } from "./lib/overrides.svelte";
   import Icon from "./components/Icon.svelte";
 
   interface Notice {
@@ -19,6 +20,8 @@
     body: string;
     avatar: string | null;
     action: { chat?: { account: string; user: number | null }; url?: string; join?: Record<string, unknown>; main?: boolean };
+    /** The game it's about (game template). */
+    game?: { name: string; icon: string | null; banner: string | null; playing: number | null; creator: string | null };
   }
   type Shown = Notice & { leaving: boolean; timer?: ReturnType<typeof setTimeout> };
 
@@ -32,6 +35,9 @@
 
   let list = $state<Shown[]>([]);
   let seconds = $state(6);
+  /** "rich": each kind its own template; "compact": one small card. */
+  let style = $state<"rich" | "compact">("rich");
+  const playing = (n: number | null) => (n == null ? "" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K playing` : `${n} playing`);
   let stack = $state<HTMLElement>();
 
   const ICONS: Record<Notice["kind"], string> = { message: "chat", friend_request: "add-account", friend_join: "play", roblox: "bell" };
@@ -50,6 +56,14 @@
   }
 
   function chime() {
+    // A plugin's or theme's sound, if one replaces it.
+    const custom = overrides.sounds["notification"];
+    if (custom) {
+      const audio = new Audio(custom);
+      audio.volume = 0.6;
+      audio.play().catch(() => {});
+      return;
+    }
     try {
       const ctx = new AudioContext();
       const gain = ctx.createGain();
@@ -112,8 +126,10 @@
 
   onMount(() => {
     connect();
-    async function show(batch: { notices: Notice[]; seconds: number; sound: boolean }) {
+    const assets = followUiAssets();
+    async function show(batch: { notices: Notice[]; seconds: number; sound: boolean; style?: "rich" | "compact" }) {
       seconds = batch.seconds;
+      style = batch.style ?? "rich";
       const fresh = batch.notices.filter((n) => !list.some((x) => x.id === n.id));
       if (!fresh.length) return;
       // At most four at once; the oldest make room.
@@ -134,6 +150,7 @@
     take();
     return () => {
       off.then((f) => f());
+      assets();
     };
   });
 </script>
@@ -143,6 +160,7 @@
     <div
       class="card kind-{n.kind}"
       class:leaving={n.leaving}
+      class:rich={style === "rich"}
       role="button"
       tabindex="-1"
       onclick={() => open(n)}
@@ -150,6 +168,36 @@
       onmouseenter={() => clearTimeout(n.timer)}
       onmouseleave={() => schedule(n)}
     >
+      {#if style === "rich" && n.kind === "friend_join" && n.game}
+        <!-- A game: its banner, icon and name, and who's playing. -->
+        <div class="game">
+          {#if n.game.banner}<img class="banner" src={n.game.banner} alt="" />{/if}
+          <div class="shade"></div>
+          <div class="game-info">
+            {#if n.game.icon}<img class="game-icon" src={n.game.icon} alt="" />{/if}
+            <span class="col" style="gap: 0; min-width: 0">
+              <span class="game-name line">{n.game.name}</span>
+              <span class="game-meta line">{[n.game.creator, playing(n.game.playing)].filter(Boolean).join(" · ")}</span>
+            </span>
+          </div>
+        </div>
+        <div class="game-foot">
+          <span class="mini-face">{#if n.avatar}<img src={n.avatar} alt="" />{:else}<Icon name="account" size={12} />{/if}</span>
+          <span class="grow line"><b>{who(n.title)}</b> started playing</span>
+          <span class="join">Join</span>
+        </div>
+      {:else if style === "rich" && n.kind === "message"}
+        <!-- A message, like a chat app: who, when, and a bubble. -->
+        <span class="face">
+          {#if n.avatar}<img src={n.avatar} alt="" />{:else}<Icon name="chat" size={18} />{/if}
+          <span class="online"></span>
+        </span>
+        <span class="col grow" style="gap: 3px; min-width: 0">
+          <span class="top"><span class="sender line">{who(n.title)}</span><span class="when">now</span></span>
+          <span class="bubble">{n.body}</span>
+          <span class="hint">Click to reply</span>
+        </span>
+      {:else}
       <span class="face">
         {#if n.avatar}<img src={n.avatar} alt="" />{:else}<Icon name={ICONS[n.kind]} size={18} />{/if}
         <span class="kind"><Icon name={ICONS[n.kind]} size={9} /></span>
@@ -163,6 +211,7 @@
         <span class="title line">{who(n.title)}</span>
         <span class="body">{n.body}</span>
       </span>
+      {/if}
       <button
         class="close"
         aria-label="Dismiss"
@@ -312,6 +361,144 @@
   .close:hover {
     background: rgb(var(--surface) / 0.1);
     color: rgb(var(--text));
+  }
+  /* Rich: a game's banner. */
+  .card.rich.kind-friend_join:has(.game) {
+    flex-direction: column;
+    gap: 0;
+    padding: 0;
+  }
+  .game {
+    position: relative;
+    height: 112px;
+    width: 100%;
+    overflow: hidden;
+    background: rgb(var(--surface) / 0.06);
+  }
+  .banner {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.02);
+  }
+  .shade {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(transparent 25%, rgb(0 0 0 / 0.78));
+  }
+  .game-info {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: white;
+  }
+  .game-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    border: 2px solid rgb(255 255 255 / 0.85);
+    flex: none;
+  }
+  .game-name {
+    font-weight: 800;
+    font-size: 14.5px;
+    text-shadow: 0 1px 6px rgb(0 0 0 / 0.6);
+  }
+  .game-meta {
+    font-size: 11.5px;
+    opacity: 0.85;
+  }
+  .game-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px 11px;
+    font-size: 12.5px;
+    color: rgb(var(--muted));
+  }
+  .game-foot b {
+    color: rgb(var(--text));
+  }
+  .mini-face {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border-radius: 50%;
+    overflow: hidden;
+    background: rgb(var(--surface) / 0.1);
+  }
+  .mini-face img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .join {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #30a46c;
+    color: white;
+    font-weight: 700;
+    font-size: 11.5px;
+  }
+  .card.rich:has(.game) .close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    margin: 0;
+    background: rgb(0 0 0 / 0.45);
+    color: white;
+    z-index: 1;
+  }
+  /* Rich: a message. */
+  .online {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #30a46c;
+    border: 2px solid rgb(var(--panel));
+  }
+  .sender {
+    font-weight: 700;
+    font-size: 13.5px;
+    color: rgb(var(--text));
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .when {
+    margin-left: auto;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .bubble {
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 7px 11px;
+    border-radius: 4px 14px 14px 14px;
+    background: rgb(var(--surface) / 0.09);
+    color: rgb(var(--text));
+    font-size: 12.5px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .hint {
+    font-size: 10.5px;
+    color: rgb(var(--faint));
   }
   .timer {
     position: absolute;

@@ -64,17 +64,6 @@ impl Service {
                 [r.record_hotkey.clone(), r.clip_hotkey.clone(), r.manual_clip_hotkey.clone()],
             )
         };
-        let automation = |p: &Preferences| {
-            (
-                p.plugins.contains(crate::core::model::MACROS_PLUGIN),
-                p.macros.iter().map(|m| (m.id, m.hotkey.clone(), m.game_only)).collect::<Vec<_>>(),
-                p.autoclicker.enabled,
-                p.autoclicker.hotkey.clone(),
-                p.autoclicker.game_only,
-                p.macro_settings.record_hotkey.clone(),
-                p.macro_settings.stop_hotkey.clone(),
-            )
-        };
         if before.keybinds != after.keybinds
             || before.emoji_shortcodes != after.emoji_shortcodes
             || before.input_overlay != after.input_overlay
@@ -83,13 +72,36 @@ impl Service {
             self.read().input_dirty = true;
             self.input_settings_changed();
         }
+        if before.stats_overlay != after.stats_overlay {
+            self.stats_settings_changed();
+        }
         if before.mcp != after.mcp {
             self.restart_mcp();
         }
         if before.plugins != after.plugins {
-            tokio::task::spawn_blocking(crate::service::plugins::refresh_sdk);
+            let me = self.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(crate::service::plugins::refresh_sdk).await;
+                me.refresh_plugins().await;
+                // A plugin turned off loses its hotkeys, chip, styles and engine.
+                let off: Vec<String> = {
+                    let s = me.read();
+                    s.plugins.iter().map(|p| p.id.clone()).filter(|id| !s.bootstrapper.preferences.plugins.contains(id)).collect()
+                };
+                me.mutate(|s| {
+                    let r = &mut s.plugin_runtime;
+                    r.hotkeys.retain(|(p, ..)| !off.contains(p));
+                    r.status.retain(|st| !off.contains(&st.plugin));
+                    r.css.retain(|p, _| !off.contains(p));
+                    r.watching.retain(|p| !off.contains(p));
+                    s.input_dirty = true;
+                });
+                me.apply_hotkeys(false);
+                me.emit_theme_assets();
+                me.sync_plugin_host();
+            });
         }
-        if keys(&before) != keys(&after) || automation(&before) != automation(&after) {
+        if keys(&before) != keys(&after) {
             self.apply_hotkeys(true);
             self.prepare_overlay();
         }
@@ -99,6 +111,7 @@ impl Service {
             }
         }
         if before.discord_display != after.discord_display
+            || before.discord_app != after.discord_app
             || before.discord_join != after.discord_join
             || before.studio_presence != after.studio_presence
             || before.pious_presence != after.pious_presence
@@ -111,9 +124,42 @@ impl Service {
             if let Err(error) = crate::core::tweaks::fast_flags(&after.tweaks) {
                 self.toast(Tone::Caution, error);
             }
+            if after.tweaks.enabled {
+                let me = self.clone();
+                tokio::spawn(async move { me.apply_tweaks_everywhere().await });
+            }
             if before.tweaks.enabled && !after.tweaks.enabled {
                 self.restore_tweaks().await;
+            } else if after.tweaks.enabled
+                && (before.tweaks.fps_limit != after.tweaks.fps_limit || before.tweaks.graphics_quality != after.tweaks.graphics_quality)
+            {
+                // A settings-file tweak set back to Roblox's own: put the
+                // original back now (others apply when a game starts).
+                let tweaks = after.tweaks.clone();
+                let running = !self.read().instances.is_empty();
+                if !running {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let wanted = crate::core::tweaks::settings_values(&tweaks);
+                        if wanted.is_empty() { crate::core::tweaks::restore_settings(&store::data_dir(), false) } else { Ok(()) }
+                    })
+                    .await;
+                }
             }
+        }
+        if before.plugins != after.plugins || before.appearance.theme != after.appearance.theme {
+            self.emit_theme_assets();
+        }
+        // Plugins bring Roblox files too (cursors, sounds…).
+        if before.plugins != after.plugins && after.tweaks.enabled {
+            let me = self.clone();
+            tokio::spawn(async move { me.apply_tweaks_everywhere().await });
+        }
+        if before.taskbar != after.taskbar && !after.taskbar.badge {
+            super::taskbar::set_badge(self, 0);
+        }
+        if before.auto_update_roblox != after.auto_update_roblox && after.auto_update_roblox {
+            let me = self.clone();
+            tokio::spawn(async move { me.update_roblox_in_background(true).await });
         }
         if before.auto_update != after.auto_update && after.auto_update {
             self.check_for_update(false).await;
@@ -121,28 +167,88 @@ impl Service {
         Ok(())
     }
 
-    /// Undoes Pious's tweaks in every build not in use right now.
+    /// Undoes everything tweaks changed: files in every build not in use
+    /// right now, Windows' compatibility flags for Roblox, and the values
+    /// tweaks put in Roblox's settings file. (The window title, icon and
+    /// priority of open Roblox windows go back by themselves, see
+    /// `housekeeping_loop`.) Builds in use are undone at their next launch.
     pub async fn restore_tweaks(self: &Shared) {
-        let builds: Vec<std::path::PathBuf> = {
+        let (builds, running, all) = {
             let s = self.read();
-            s.bootstrapper
+            let all: Vec<std::path::PathBuf> = s.bootstrapper.versions.iter().map(|v| v.path.clone()).collect();
+            let builds: Vec<std::path::PathBuf> = s
+                .bootstrapper
                 .versions
                 .iter()
                 .filter(|v| !s.instances.iter().any(|i| i.version.as_deref() == Some(v.hash.as_str())))
                 .map(|v| v.path.clone())
-                .collect()
+                .collect();
+            (builds, !s.instances.is_empty(), all)
         };
-        let failed = tokio::task::spawn_blocking(move || {
+        let (failed, settings) = tokio::task::spawn_blocking(move || {
             let failed = builds.iter().filter(|b| crate::core::tweaks::restore(b).is_err()).count();
+            for build in &builds {
+                crate::core::compat::apply(build, &[]);
+            }
+            // Windows reads the graphics card choice when Roblox starts, so
+            // builds in use can have theirs back now too.
+            for build in &all {
+                crate::core::gpupref::apply(build, None);
+            }
             crate::core::fscache::refresh(builds.iter().map(|b| crate::core::tweaks::applied_marker(b)));
-            failed
+            // Roblox writes its settings file back when it closes, so with a
+            // window open the originals are kept to put back next launch.
+            let running = running || !crate::core::process::roblox_pids().is_empty();
+            (failed, crate::core::tweaks::restore_settings(&store::data_dir(), running))
         })
         .await
-        .unwrap_or(0);
+        .unwrap_or((0, Ok(())));
         if failed > 0 {
             self.toast(Tone::Caution, "Some builds still have tweaks because they're in use. They're undone next time.");
         }
+        if let Err(error) = settings {
+            self.toast(Tone::Caution, error);
+        }
         self.emit();
+    }
+
+    /// Puts the tweaks on every installed Roblox build now, not only right
+    /// before Pious starts a game: then a change shows in the next game
+    /// however it's started (roblox.com, Roblox's own launcher, a shortcut).
+    /// Waits a moment so a burst of changes (dragging a slider) applies once.
+    pub async fn apply_tweaks_everywhere(self: &Shared) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LATEST: AtomicU64 = AtomicU64::new(0);
+        let mine = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        if LATEST.load(Ordering::Relaxed) != mine {
+            return;
+        }
+        let (builds, tweaks) = {
+            let s = self.read();
+            let builds: Vec<std::path::PathBuf> = s.bootstrapper.versions.iter().filter(|v| v.is_usable()).map(|v| v.path.clone()).collect();
+            (builds, s.bootstrapper.preferences.tweaks.clone())
+        };
+        // Off is handled by `restore_tweaks`.
+        if !tweaks.enabled {
+            return;
+        }
+        for build in builds {
+            self.apply_tweaks_to(build, tweaks.clone()).await;
+        }
+        self.emit();
+    }
+
+    /// Every tweak back to its normal value (Tweaks → Reset to default), and
+    /// whatever they changed undone.
+    pub async fn reset_tweaks(self: &Shared) {
+        self.mutate(|s| {
+            s.bootstrapper.preferences.tweaks.reset();
+            s.dirty = true;
+        });
+        self.restore_tweaks().await;
+        self.apply_tweaks_everywhere().await;
+        self.toast(Tone::Positive, "Every tweak is back to normal.");
     }
 
     /// Lets the user choose a font file for the font tweak.
@@ -203,6 +309,47 @@ impl Service {
             s.dirty = true;
         });
         apply_window(self);
+        self.emit_theme_assets();
+    }
+
+    /// Uses a theme: its look goes into Appearance (to fine-tune after),
+    /// and its extras apply while it's the theme in use.
+    pub fn apply_theme(self: &Shared, id: &str) -> Result<(), String> {
+        let theme = self.read().themes.iter().find(|t| t.id == id).cloned().ok_or("That theme isn't installed anymore.")?;
+        if let Some(problem) = theme.problem {
+            return Err(format!("{} can't be used: {problem}", theme.name));
+        }
+        let look = theme.look.ok_or("That theme can't be used.")?;
+        if let Some(picture) = &look.background_image {
+            use tauri::Manager;
+            let _ = self.app().asset_protocol_scope().allow_file(picture);
+        }
+        self.mutate(|s| {
+            s.bootstrapper.preferences.appearance = look;
+            s.dirty = true;
+        });
+        apply_window(self);
+        self.emit_theme_assets();
+        Ok(())
+    }
+
+    /// Sends every window the stylesheets, icons and sounds of enabled
+    /// plugins and the theme in use (read off the state lock).
+    pub fn emit_theme_assets(self: &Shared) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let (enabled, theme) = {
+                let s = me.read();
+                let p = &s.bootstrapper.preferences;
+                (p.plugins.clone(), p.appearance.theme.clone())
+            };
+            let mut assets = tokio::task::spawn_blocking(move || super::plugins::ui_assets(&enabled, theme.as_deref())).await.unwrap_or_default();
+            // Styles plugins added while running (ui.css).
+            assets.css.extend(me.read().plugin_runtime.css.values().filter(|c| !c.is_empty()).cloned());
+            me.read().ui_assets = assets.clone();
+            use tauri::Emitter;
+            let _ = me.app().emit("ui-assets", assets);
+        });
     }
 
     /// Lets the user choose a background picture. A copy is kept with the

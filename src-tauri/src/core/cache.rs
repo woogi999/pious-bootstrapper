@@ -14,8 +14,17 @@ fn path(key: &str) -> PathBuf {
 
 /// The cached value for `key`, if there is one and it still reads.
 pub fn load<T: DeserializeOwned>(key: &str) -> Option<T> {
-    let bytes = std::fs::read(path(key)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let path = path(key);
+    let bytes = std::fs::read(&path).ok()?;
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            // Damaged (or from another version): it's only a cache, so it
+            // goes, and is made again from fresh data.
+            let _ = std::fs::remove_file(path);
+            None
+        }
+    }
 }
 
 /// Caches `value` under `key` (in the background).

@@ -44,6 +44,12 @@
   type Choice = { id: string; name: string; picture: string | null };
   let crosshairs = $state<Choice[]>([]);
   let icons = $state<Choice[]>([]);
+  let cursors = $state<Choice[]>([]);
+  $effect(() => {
+    call<[Tweaks["cursor"], string, string | null][]>("cursor_previews").then(
+      (list) => (cursors = list.filter(([id]) => id !== "Default").map(([id, name, picture]) => ({ id, name, picture }))),
+    );
+  });
   $effect(() => {
     const color = tweaks.shiftlock_color;
     call<[string, string, string][]>("shiftlock_previews", { color }).then(
@@ -54,6 +60,32 @@
     icons = [];
     call<[string, string, string | null][]>("player_icon_previews").then((list) => (icons = list.map(([id, name, picture]) => ({ id, name, picture }))));
   });
+  let skies = $state<Choice[]>([]);
+  $effect(() => {
+    call<[string, string, string][]>("skybox_previews").then((list) => (skies = list.map(([id, name, picture]) => ({ id, name, picture }))));
+  });
+  async function pickSky() {
+    try {
+      const folder = await call<string | null>("pick_skybox_folder");
+      if (folder) set({ skybox: "custom", skybox_folder: folder });
+    } catch (e) {
+      app.toast("negative", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Graphics cards Windows can pick for Roblox ("Specific GPU 1, 2…").
+  let adapters = $state<string[]>([]);
+  $effect(() => {
+    call<string[]>("graphics_adapters").then((list) => (adapters = list));
+  });
+  const gpuChoices = $derived([
+    { value: null as string | null, label: "Windows' setting" },
+    { value: "default" as string | null, label: "Let Windows decide" },
+    { value: "power_saving" as string | null, label: "Power saving" },
+    { value: "high_performance" as string | null, label: "High performance" },
+    ...adapters.map((name, i) => ({ value: `adapter:${i}` as string | null, label: `Specific GPU ${i + 1} · ${name}` })),
+  ]);
+
   async function pickPicture(title: string, field: "shiftlock" | "player_icon") {
     const path = await call<string | null>("pick_picture", { title });
     if (path) set(field === "shiftlock" ? { shiftlock: "custom", shiftlock_file: path } : { player_icon: "custom", player_icon_file: path });
@@ -72,7 +104,15 @@
     { value: "Vulkan", label: "Vulkan" },
     { value: "OpenGL", label: "OpenGL" },
   ];
-  const msaaChoices = [0, 1, 2, 4, 8].map((n) => ({ value: n, label: n === 0 ? "Automatic" : `${n}×` }));
+  // -1 is "off (×0)", kept in its own field: msaa 0 means Roblox decides.
+  const msaaChoices = [0, -1, 1, 2, 4, 8].map((n) => ({ value: n, label: n === 0 ? "Automatic" : n === -1 ? "Off (×0)" : `${n}×` }));
+  const renderQualityChoices = [
+    { value: null as number | null, label: "Follow the slider" },
+    ...Array.from({ length: 21 }, (_, i) => i + 1).map((n) => ({
+      value: n as number | null,
+      label: n === 1 ? "1 · lowest" : n === 21 ? "21 · highest" : String(n),
+    })),
+  ];
   const textureChoices = [
     { value: null as number | null, label: "Automatic" },
     ...["Lowest", "Low", "Medium", "Highest"].map((label, i) => ({ value: i as number | null, label })),
@@ -84,11 +124,6 @@
   const meshChoices = [
     { value: null as number | null, label: "Automatic" },
     ...["Lowest", "Low", "Medium", "High", "Highest"].map((label, i) => ({ value: i as number | null, label })),
-  ];
-  const cursorChoices = [
-    { value: "Default" as Tweaks["cursor"], label: "Roblox's" },
-    { value: "From2013" as Tweaks["cursor"], label: "2013 (classic)" },
-    { value: "From2006" as Tweaks["cursor"], label: "2006 (oldest)" },
   ];
   const emojiChoices: { value: Tweaks["emoji"]; label: string }[] = [
     { value: "Default", label: "Roblox's (Twemoji)" },
@@ -247,9 +282,19 @@
       <h1 class="page-title">Tweaks</h1>
       <span class="meta">Everything bootstrappers do, built in: FPS unlock, graphics, FastFlags, mods, fonts and more</span>
     </div>
+    <button
+      class="btn tertiary"
+      title="Every tweak back to Roblox's normal value, and everything they changed undone"
+      onclick={() =>
+        app.confirm(
+          "Reset tweaks to default?",
+          "Every tweak goes back to Roblox's normal value and everything tweaks changed is undone. Your FastFlag profiles are kept, but none is in use.",
+          "Reset",
+          () => run("reset_tweaks"),
+        )}><Icon name="refresh" />Reset to default</button
+    >
     <Switch on={tweaks.enabled} onchange={(on) => set({ enabled: on })} />
   </div>
-
   <div class="tabs" role="tablist">
     {#each TABS as [id, label] (id)}
       <button class="tab" class:on={app.tweaksTab === id} role="tab" aria-selected={app.tweaksTab === id} onclick={() => (app.tweaksTab = id)}>{label}</button>
@@ -276,6 +321,8 @@
     <Icon name="shield" />Pious applies these to the Roblox build it starts and backs up every file it replaces. Turning tweaks off puts
     the originals back, including anything a bootstrapper put there.
   </div>
+  <!-- Off: every tweak below is greyed out and can't be changed. -->
+  <fieldset class="tweak-fields" disabled={off} aria-disabled={off}>
 
   {#if app.tweaksTab === "performance"}
   <section class="group">
@@ -288,6 +335,7 @@
         {off}
       >
         <Select
+          disabled={off}
           options={fpsChoices}
           value={tweaks.fps_limit === null || tweaks.fps_limit === 9999 || FPS_PRESETS.includes(tweaks.fps_limit) ? tweaks.fps_limit : -1}
           onchange={(v) => v !== -1 && set({ fps_limit: v })}
@@ -310,23 +358,66 @@
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="cube" title="Graphics API" description="What Roblox prefers to draw with. Try another if the game stutters or crashes." {off}>
-        <Select options={graphicsChoices} value={tweaks.graphics} onchange={(v) => set({ graphics: v })} width="190px" />
+        <Select disabled={off} options={graphicsChoices} value={tweaks.graphics} onchange={(v) => set({ graphics: v })} width="190px" />
       </SettingRow>
       <hr class="divider" />
-      <SettingRow icon="sparkles" title="Anti-aliasing" description="Smooths jagged edges; higher costs more frames." {off}>
-        <Select options={msaaChoices} value={tweaks.msaa} onchange={(v) => set({ msaa: v })} width="190px" />
+      <SettingRow icon="sparkles" title="Anti-aliasing" description="Smooths jagged edges; higher costs more frames. Off (×0) turns it off completely for the most frames." {off}>
+        <Select
+          disabled={off}
+          options={msaaChoices}
+          value={tweaks.msaa_off ? -1 : tweaks.msaa}
+          onchange={(v) => set(v === -1 ? { msaa_off: true, msaa: 0 } : { msaa_off: false, msaa: v })}
+          width="190px"
+        />
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="picture" title="Texture quality" description="Force a texture quality instead of Roblox choosing one." {off}>
-        <Select options={textureChoices} value={tweaks.texture_quality} onchange={(v) => set({ texture_quality: v })} width="190px" />
+        <Select disabled={off} options={textureChoices} value={tweaks.texture_quality} onchange={(v) => set({ texture_quality: v })} width="190px" />
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="sun" title="Graphics quality" description="Roblox's own graphics slider, set before each game starts (levels 1–10)." {off}>
-        <Select options={qualityChoices} value={tweaks.graphics_quality} onchange={(v) => set({ graphics_quality: v })} width="190px" />
+        <Select disabled={off} options={qualityChoices} value={tweaks.graphics_quality} onchange={(v) => set({ graphics_quality: v })} width="190px" />
       </SettingRow>
       <hr class="divider" />
-      <SettingRow icon="sun" title="Simpler lighting" description="Stop lighting and shadows from updating. Big frame gain, flatter look." {off}>
+      <SettingRow
+        icon="sun"
+        title="Render quality (21 levels)"
+        description="Roblox's old hidden quality setting: 21 steps instead of the slider's 10, so it goes lower than the slider's lowest and higher than its highest. Overrides the slider while set."
+        {off}
+      >
+        <Select disabled={off} options={renderQualityChoices} value={tweaks.render_quality} onchange={(v) => set({ render_quality: v })} width="190px" />
+      </SettingRow>
+      <hr class="divider" />
+      <SettingRow
+        icon="sun"
+        title="Pause voxelizer"
+        description="Stops Roblox from recomputing light and shadows as things move. Big frame gain, flatter and sometimes stale lighting."
+        {off}
+      >
         <Switch on={tweaks.pause_voxelizer} disabled={off} onchange={(on) => set({ pause_voxelizer: on })} />
+      </SettingRow>
+      <hr class="divider" />
+      <SettingRow icon="cpu-chip" title="Roblox priority" description="Give Roblox the CPU ahead of other programs. High can make the rest of your PC sluggish while you play." {off}>
+        <Select
+          disabled={off}
+          options={[
+            { value: null, label: "Normal" },
+            { value: "above_normal", label: "Above normal" },
+            { value: "high", label: "High" },
+          ]}
+          value={tweaks.priority}
+          onchange={(v) => set({ priority: v })}
+          width="190px"
+        />
+      </SettingRow>
+      <hr class="divider" />
+      <SettingRow
+        icon="cpu-chip"
+        title="Graphics card"
+        description="Which GPU Windows runs Roblox on, like Settings → System → Display → Graphics. Takes effect the next time Roblox starts."
+        {off}
+      >
+        <Select disabled={off} options={gpuChoices} value={tweaks.gpu} onchange={(v) => set({ gpu: v })} width="230px" />
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="cloud" title="Gray sky" description="A plain gray sky instead of the game's." {off}>
@@ -337,8 +428,12 @@
         <Switch on={tweaks.still_grass} disabled={off} onchange={(on) => set({ still_grass: on })} />
       </SettingRow>
       <hr class="divider" />
+      <SettingRow icon="sparkles" title="No grass" description="Don't draw grass at all. A real frame gain on games with lots of terrain." {off}>
+        <Switch on={tweaks.no_grass} disabled={off} onchange={(on) => set({ no_grass: on })} />
+      </SettingRow>
+      <hr class="divider" />
       <SettingRow icon="grid" title="Mesh detail" description="How far away objects keep their full detail." {off}>
-        <Select options={meshChoices} value={tweaks.mesh_detail} onchange={(v) => set({ mesh_detail: v })} width="190px" />
+        <Select disabled={off} options={meshChoices} value={tweaks.mesh_detail} onchange={(v) => set({ mesh_detail: v })} width="190px" />
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="contrast" title="Ignore display scaling" description="Render at your screen's real resolution on high-DPI displays." {off}>
@@ -367,6 +462,7 @@
       <hr class="divider" />
       <SettingRow icon="contrast" title="High DPI scaling" description="Who sizes Roblox on high-DPI screens, like in Roblox's Properties → Compatibility." {off}>
         <Select
+          disabled={off}
           options={[
             { value: null, label: "Windows decides" },
             { value: "application", label: "Roblox" },
@@ -378,19 +474,6 @@
           width="190px"
         />
       </SettingRow>
-      <hr class="divider" />
-      <SettingRow icon="cpu-chip" title="Roblox priority" description="Give Roblox the CPU ahead of other programs. High can make the rest of your PC sluggish while you play." {off}>
-        <Select
-          options={[
-            { value: null, label: "Normal" },
-            { value: "above_normal", label: "Above normal" },
-            { value: "high", label: "High" },
-          ]}
-          value={tweaks.priority}
-          onchange={(v) => set({ priority: v })}
-          width="190px"
-        />
-      </SettingRow>
     </div>
   </section>
   {/if}
@@ -399,9 +482,19 @@
   <section class="group">
     <span class="label">Mods</span>
     <div class="glass list">
-      <SettingRow icon="arrow-right" title="Mouse cursor" description="Bring back a classic Roblox cursor." {off}>
-        <Select options={cursorChoices} value={tweaks.cursor} onchange={(v) => set({ cursor: v })} width="190px" />
-      </SettingRow>
+      <SettingRow
+        icon="arrow-right"
+        title="Mouse cursor"
+        description="Roblox's pointer: a classic one, or a set from Voidstrap or Froststrap. Applies to every Roblox version right away (and to new ones as they install)."
+        {off}
+      />
+      <PictureChoices
+        items={cursors}
+        value={tweaks.cursor === "Default" ? null : tweaks.cursor}
+        disabled={off}
+        dark
+        onpick={(id) => set({ cursor: (id ?? "Default") as Tweaks["cursor"] })}
+      />
       <hr class="divider" />
       <SettingRow
         icon="target"
@@ -447,6 +540,14 @@
       />
       <hr class="divider" />
       <SettingRow
+        icon="cloud"
+        title="Sky"
+        description="The sky in games that don't set their own. Your own: a folder with six pictures named back, front, left, right, up and down (or Roblox's bk, ft, lf, rt, up, dn; .tex files work too). Applies the next time a game starts."
+        {off}
+      />
+      <PictureChoices items={skies} value={tweaks.skybox} custom={tweaks.skybox_folder} disabled={off} onpick={(id) => set({ skybox: id })} oncustom={pickSky} />
+      <hr class="divider" />
+      <SettingRow
         icon="sparkles"
         title="Emoji style"
         description={tweaks.emoji === "Apple"
@@ -454,7 +555,7 @@
           : "Change how emoji look in chat and text."}
         {off}
       >
-        <Select options={emojiChoices} value={tweaks.emoji} onchange={(v) => set({ emoji: v })} width="230px" />
+        <Select disabled={off} options={emojiChoices} value={tweaks.emoji} onchange={(v) => set({ emoji: v })} width="230px" />
       </SettingRow>
       <hr class="divider" />
       <SettingRow icon="motion" title="Old character sounds" description="The classic walk, jump and get-up sounds." {off}>
@@ -471,7 +572,7 @@
         description="Replace Roblox's interface font: one of Roblox's own, a game font like Minecraft or Pokémon, or any .ttf or .otf file. Emoji stay as they are."
         {off}
       >
-        <Select options={fontChoices} value={fontValue} onchange={pickFont} width="280px" />
+        <Select disabled={off} options={fontChoices} value={fontValue} onchange={pickFont} width="280px" />
         <button class="btn" disabled={off} title="Use a font file" onclick={() => run("pick_font")}><Icon name="folder" />File…</button>
       </SettingRow>
       <div class:dim={off}><FontPreview preset={tweaks.font_preset} file={tweaks.font_preset ? null : tweaks.font} /></div>
@@ -518,6 +619,7 @@
     <div class="glass editor" class:off>
       <div class="row profiles">
         <Select
+          disabled={off}
           options={profiles.map((p) => ({ value: p.id as string | null, label: `${p.name}${p.id === tweaks.active_profile ? " (in use)" : ""}` }))}
           value={profile?.id ?? null}
           onchange={(id) => (selected = id)}
@@ -625,18 +727,35 @@
     <span class="label">Maintenance</span>
     <div class="glass list">
       <SettingRow icon="remove" title="Clean Roblox's leftovers" description="Delete old Roblox logs and cache files once a day to save space." {off}>
-        <Select options={cleanerChoices} value={tweaks.cleaner_days} onchange={(v) => set({ cleaner_days: v })} width="190px" />
+        <Select disabled={off} options={cleanerChoices} value={tweaks.cleaner_days} onchange={(v) => set({ cleaner_days: v })} width="190px" />
         <button class="btn" onclick={() => run("clean_roblox")}><Icon name="refresh" />Clean now</button>
       </SettingRow>
     </div>
   </section>
   {/if}
+  </fieldset>
   {/if}
   </div>
   {/key}
 </div>
 
 <style>
+  .tweak-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    transition: opacity var(--med);
+  }
+  .tweak-fields:disabled {
+    opacity: 0.45;
+    filter: grayscale(0.6);
+    pointer-events: none;
+    user-select: none;
+  }
   .tabs {
     display: flex;
     gap: 2px;

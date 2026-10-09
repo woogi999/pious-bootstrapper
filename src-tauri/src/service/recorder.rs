@@ -36,6 +36,9 @@ pub struct Capture {
     cutting: u32,
     /// The capture was switched from GPU to GDI capture.
     gdi_fallback: bool,
+    /// AMD's own capture failed on this PC: Desktop Duplication from now
+    /// on (until Pious restarts).
+    amd_failed: bool,
     pub installing: Option<(u64, Option<u64>)>,
     pub error: Option<String>,
     pub last_saved: Option<String>,
@@ -64,6 +67,18 @@ fn work_dir() -> PathBuf {
     store::data_dir().join("cache").join("capture")
 }
 
+/// Notices sent over the game, so a late re-send never replaces a newer one.
+static HUD_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Which FFmpeg and graphics cards (and drivers) the encoder list was
+/// checked with (FFmpeg's path, size and date; each card's name and driver
+/// version), so it's checked again when either changes.
+fn ffmpeg_key(path: &std::path::Path) -> String {
+    let meta = std::fs::metadata(path).ok();
+    let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    format!("{}|{}|{modified}|{}", path.display(), meta.map_or(0, |m| m.len()), recorder::graphics_cards())
+}
+
 /// Where videos go.
 pub fn videos_folder(settings: &Recorder) -> PathBuf {
     settings
@@ -77,7 +92,7 @@ pub fn status_of(s: &super::State) -> RecorderStatus {
     let c = &s.capture;
     {
         RecorderStatus {
-            installed: ffmpeg().is_file(),
+            installed: recorder::ffmpeg_ready(&store::data_dir()),
             installing: c.installing,
             capturing: c.session.is_some(),
             recording_since: c.recording.as_ref().map(|(at, ..)| at.elapsed().as_secs_f64()),
@@ -119,7 +134,9 @@ impl Service {
         if !path.is_file() {
             return Vec::new();
         }
+        let key = ffmpeg_key(&path);
         let found = tokio::task::spawn_blocking(move || recorder::probe_encoders(&path)).await.unwrap_or_default();
+        crate::core::cache::save("encoders", &(key, found.clone()));
         self.mutate(|s| s.capture.encoders = Some(found.clone()));
         found
     }
@@ -284,14 +301,27 @@ impl Service {
     }
 
     async fn start_capture(self: &Shared, gdi: bool) -> Result<(), String> {
-        let path = ffmpeg();
+        let path = tokio::task::spawn_blocking(ffmpeg).await.map_err(|e| e.to_string())?;
         if !path.is_file() {
-            return Err("Set up recording in Settings → Recording first (it downloads FFmpeg).".into());
+            return Err(if recorder::built_in() {
+                "Pious couldn't unpack its recorder into its data folder. Check there's free space, then try again.".into()
+            } else {
+                "Set up recording in Settings → Recording first (it downloads FFmpeg).".into()
+            });
         }
         let known = self.read().capture.encoders.clone();
         let encoders = match known {
             Some(found) => found,
-            None => self.check_encoders().await,
+            // What worked last time with this same FFmpeg, so a recording
+            // starts at once instead of re-checking every encoder first. An
+            // encoder that fails for real is dropped (see `recorder_loop`).
+            None => match crate::core::cache::load::<(String, Vec<String>)>("encoders").filter(|(key, list)| *key == ffmpeg_key(&path) && !list.is_empty()) {
+                Some((_, list)) => {
+                    self.mutate(|s| s.capture.encoders = Some(list.clone()));
+                    list
+                }
+                None => self.check_encoders().await,
+            },
         };
         let settings = self.read().bootstrapper.preferences.recorder.clone();
         let encoder = recorder::pick_encoder(&settings, &encoders).ok_or("No video encoder works on this PC.")?;
@@ -319,6 +349,7 @@ impl Service {
         if gdi {
             source.output = None;
         }
+        source.amd_capture &= !self.read().capture.amd_failed;
         let work = work_dir();
         let session = tokio::task::spawn_blocking({
             let settings = settings.clone();
@@ -343,6 +374,9 @@ impl Service {
     pub(super) async fn recorder_loop(self: Shared) {
         // Leftovers from a previous run.
         let _ = std::fs::remove_dir_all(work_dir());
+        // FFmpeg is inside Pious: unpack it now, off to the side, so the
+        // first recording doesn't wait for it.
+        let _ = tokio::task::spawn_blocking(|| recorder::unpack_built_in(&store::data_dir())).await;
         let mut started_at: Option<Instant> = None;
         let mut tick = 0u64;
         loop {
@@ -359,6 +393,8 @@ impl Service {
                 Stop,
                 Restart(bool),
                 Failed(String),
+                /// AMD's capture failed or never produced a picture.
+                AmdFailed,
             }
             let next = {
                 let mut s = self.read();
@@ -375,8 +411,9 @@ impl Service {
                     None => Next::Nothing,
                     Some(_) if !wanted => Next::Stop,
                     Some(session) => {
+                        let amd = session.uses_amd_capture();
                         if let Err(error) = session.check() {
-                            Next::Failed(error)
+                            if amd { Next::AmdFailed } else { Next::Failed(error) }
                         } else {
                             session.poll();
                             let mut keep = recording_from;
@@ -388,7 +425,9 @@ impl Service {
                             let stalled = session.uses_gpu_capture()
                                 && !session.producing()
                                 && started_at.is_some_and(|t| t.elapsed() > Duration::from_secs(6));
-                            if stalled {
+                            if stalled && amd {
+                                Next::AmdFailed
+                            } else if stalled {
                                 Next::Restart(true)
                             } else if changed && !busy {
                                 Next::Restart(gdi)
@@ -428,6 +467,25 @@ impl Service {
                     }
                     started_at = Some(Instant::now());
                 }
+                Next::AmdFailed => {
+                    // Same encoder, Desktop Duplication instead. A recording
+                    // that was running goes on in the new capture, from its
+                    // beginning (this happens within its first seconds).
+                    let session = self.mutate(|s| {
+                        s.capture.amd_failed = true;
+                        if let Some(recording) = s.capture.recording.as_mut() {
+                            recording.1 = 0.0;
+                        }
+                        s.capture.session.take()
+                    });
+                    if let Some(session) = session {
+                        tokio::task::spawn_blocking(move || session.discard());
+                    }
+                    if let Err(error) = self.start_capture(false).await {
+                        self.mutate(|s| s.capture.error = Some(error));
+                    }
+                    started_at = Some(Instant::now());
+                }
                 Next::Failed(error) => {
                     // The encoder itself failed (it passed the check but not
                     // with the game's frames): leave it out from now on, so
@@ -441,6 +499,7 @@ impl Service {
                             if let (Some(bad), Some(list)) = (s.capture.encoder.clone(), s.capture.encoders.as_mut()) {
                                 if list.len() > 1 && !bad.starts_with("lib") {
                                     list.retain(|e| *e != bad);
+                                    crate::core::cache::save("encoders", &(ffmpeg_key(&ffmpeg()), list.clone()));
                                     dropped = Some(bad);
                                 }
                             }
@@ -477,7 +536,11 @@ impl Service {
         }
         let app = self.app().clone();
         let payload = json!({ "kind": kind, "text": text });
-        let _ = self.app().run_on_main_thread(move || {
+        let sent = HUD_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        // Off the window thread: building a window inside a main-thread call
+        // can hang on Windows (and window calls are safe from any thread).
+        tauri::async_runtime::spawn_blocking(move || {
+            let fresh = app.get_webview_window(HUD_WINDOW).is_none();
             let Ok(window) = hud_window(&app) else { return };
             // Top right of the screen the game is on.
             let monitor = app
@@ -497,7 +560,15 @@ impl Service {
             }
             let _ = window.show();
             let _ = window.set_always_on_top(true);
-            let _ = app.emit_to(HUD_WINDOW, "hud", payload);
+            let _ = app.emit_to(HUD_WINDOW, "hud", payload.clone());
+            // A window that was just made wasn't listening yet: say it again,
+            // unless a newer notice has come since.
+            if fresh {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if HUD_SENT.load(std::sync::atomic::Ordering::Relaxed) == sent {
+                    let _ = app.emit_to(HUD_WINDOW, "hud", payload);
+                }
+            }
         });
     }
 

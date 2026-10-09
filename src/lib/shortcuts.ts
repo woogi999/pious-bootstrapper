@@ -76,7 +76,8 @@ export function runAction(id: string, embedded = false): boolean {
     return true;
   }
   if (id.startsWith("macro:")) {
-    invoke("run_macro", { id: id.slice(6) }).catch((e) => app.toast("caution", String(e)));
+    // Macros live in the Macros plugin: ask it.
+    invoke("plugin_request", { feature: "macros", method: "run", args: { id: id.slice(6) } }).catch((e) => app.toast("caution", String(e)));
     return true;
   }
   switch (id) {
@@ -140,7 +141,7 @@ export function runAction(id: string, embedded = false): boolean {
       return true;
     }
     case "stop_macros":
-      invoke("stop_automation");
+      invoke("plugin_request", { feature: "macros", method: "stop", args: {} }).catch(() => {});
       return true;
     case "fullscreen":
       if (embedded) return false;

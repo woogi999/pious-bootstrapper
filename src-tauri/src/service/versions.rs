@@ -37,6 +37,12 @@ impl Service {
     }
 
     pub async fn install_version(self: &Shared, hash: String, version: Option<String>) {
+        self.install_version_with(hash, version, false).await;
+    }
+
+    /// Installs a build; `quiet` only says something when it worked (for
+    /// background updates). Returns whether it's installed now.
+    async fn install_version_with(self: &Shared, hash: String, version: Option<String>, quiet: bool) -> bool {
         let hash = hash.trim().to_owned();
         let started = self.mutate(|s| {
             if s.installs.contains_key(&hash) {
@@ -51,7 +57,7 @@ impl Service {
             true
         });
         if !started {
-            return;
+            return false;
         }
 
         let dir = self.versions_dir();
@@ -61,6 +67,9 @@ impl Service {
         while let Some(event) = events.next().await {
             match event {
                 versions::InstallEvent::Progress { downloaded, total, stage } => {
+                    if total > 0 {
+                        super::taskbar::progress(self, Some(downloaded as f64 / total as f64));
+                    }
                     self.mutate_throttled(|s| {
                         if let Some(install) = s.installs.get_mut(&hash) {
                             install.downloaded = downloaded;
@@ -78,12 +87,70 @@ impl Service {
                             s.dirty = true;
                         }
                     });
-                    match result {
-                        Ok(record) => self.toast(Tone::Positive, format!("{} is installed and ready", record.title())),
-                        Err(error) => self.toast(Tone::Negative, error),
-                    }
-                    return;
+                    super::taskbar::progress(self, None);
+                    return match result {
+                        Ok(record) => {
+                            // A new build gets the tweaks straight away.
+                            let me = self.clone();
+                            tokio::spawn(async move { me.apply_tweaks_everywhere().await });
+                            if quiet {
+                                self.toast(Tone::Neutral, format!("Roblox was updated to {} in the background", record.title()));
+                            } else {
+                                self.toast(Tone::Positive, format!("{} is installed and ready", record.title()));
+                            }
+                            true
+                        }
+                        Err(error) => {
+                            if !quiet {
+                                self.toast(Tone::Negative, error);
+                            }
+                            false
+                        }
+                    };
                 }
+            }
+        }
+        false
+    }
+
+    /// Keeps Roblox up to date in the background when that's on: checks
+    /// every half hour and installs a new build once. A build that failed
+    /// to install isn't tried again for six hours.
+    pub(super) async fn roblox_update_loop(self: Shared) {
+        loop {
+            self.update_roblox_in_background(false).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        }
+    }
+
+    pub async fn update_roblox_in_background(self: &Shared, now: bool) {
+        use std::sync::Mutex;
+        static FAILED: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+        if !self.read().bootstrapper.preferences.auto_update_roblox {
+            return;
+        }
+        if !now {
+            // Give the start-up a moment; nothing here is urgent.
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        }
+        let Ok(latest) = roblox::latest_client_version().await else { return };
+        let (installed, busy) = {
+            let s = self.read();
+            (s.bootstrapper.version(&latest.hash).is_some_and(|v| v.is_usable()), !s.installs.is_empty() || s.roblox_updating)
+        };
+        let recently_failed = FAILED.lock().ok().and_then(|f| f.clone()).is_some_and(|(hash, at)| hash == latest.hash && at.elapsed().as_secs() < 6 * 3600);
+        if installed || busy || recently_failed {
+            return;
+        }
+        self.mutate(|s| {
+            s.roblox_updating = true;
+            s.latest = Some(latest.clone());
+        });
+        let ok = self.install_version_with(latest.hash.clone(), Some(latest.version.clone()), true).await;
+        self.mutate(|s| s.roblox_updating = false);
+        if !ok {
+            if let Ok(mut failed) = FAILED.lock() {
+                *failed = Some((latest.hash, std::time::Instant::now()));
             }
         }
     }

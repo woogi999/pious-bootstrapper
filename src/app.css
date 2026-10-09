@@ -23,16 +23,22 @@
   --glass: 1;
   --window-alpha: 1;
 
-  --r-sm: 8px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 18px;
+  /* Themes and Settings → Appearance scale these (see lib/theme.ts). */
+  --radius: 1;
+  --font-scale: 1;
+  --ui-font: Manrope;
+  --accent-2: var(--accent);
+  --gradient: none;
+  --r-sm: calc(8px * var(--radius));
+  --r-md: calc(10px * var(--radius));
+  --r-lg: calc(14px * var(--radius));
+  --r-xl: calc(18px * var(--radius));
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --fast: 140ms;
   --med: 220ms;
 
-  font-family: Manrope, system-ui, sans-serif;
-  font-size: 13px;
+  font-family: var(--ui-font), Manrope, system-ui, sans-serif;
+  font-size: calc(13px * var(--font-scale));
   line-height: 1.4;
   color: rgb(var(--text));
   -webkit-font-smoothing: antialiased;

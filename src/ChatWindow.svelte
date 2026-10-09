@@ -11,7 +11,7 @@
   import { app, connect } from "./lib/state.svelte";
   import { handleLaunch, run } from "./lib/api";
   import { accountLabel, relative, who } from "./lib/format";
-  import { applyAppearance } from "./lib/theme";
+  import { applyAppearance, followUiAssets } from "./lib/theme";
   import { emojiShortcodes } from "./lib/emoji";
   import type { ChatMessage, Conversation, Friend, LaunchOutcome, Uuid } from "./lib/types";
   import Icon from "./components/Icon.svelte";
@@ -208,6 +208,8 @@
 
   onMount(() => {
     connect();
+    // Plugins' and the theme's styles and icons here too.
+    followUiAssets();
     win.isMaximized().then((m) => (maximized = m));
     const resized = win.onResized(async () => (maximized = await win.isMaximized()));
     const focus = win.onFocusChanged(({ payload }) => (focused = payload));

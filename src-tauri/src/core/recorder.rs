@@ -16,7 +16,7 @@
 //! picture.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,12 +52,92 @@ fn hidden(command: &mut Command) -> &mut Command {
 
 // ── FFmpeg ───────────────────────────────────────────────────────────────
 
-/// FFmpeg: the copy installed next to Pious, or one downloaded later.
+/// FFmpeg built into pious.exe (compressed by `build.rs`; empty when the
+/// build had none), and its SHA-256.
+static EMBEDDED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ffmpeg.exe.zst"));
+const EMBEDDED_SHA256: &str = include_str!(concat!(env!("OUT_DIR"), "/ffmpeg.sha256"));
+
+/// Recording works without setting anything up: FFmpeg is inside Pious.
+pub fn built_in() -> bool {
+    !EMBEDDED.is_empty()
+}
+
+/// Where the built-in FFmpeg is unpacked: named by its hash, so a Pious
+/// update with a newer FFmpeg unpacks next to (then replaces) the old one.
+fn unpacked_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("tools").join(format!("ffmpeg-{}.exe", &EMBEDDED_SHA256[..EMBEDDED_SHA256.len().min(12)]))
+}
+
+static UNPACKED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Unpacks the built-in FFmpeg if it isn't already (checked against its
+/// hash, so a damaged or changed copy is replaced). Runs once per start;
+/// callers at the same time wait for the first.
+pub fn unpack_built_in(data_dir: &Path) -> Option<PathBuf> {
+    if !built_in() {
+        return None;
+    }
+    UNPACKED
+        .get_or_init(|| {
+            let target = unpacked_path(data_dir);
+            let intact = std::fs::read(&target).ok().is_some_and(|bytes| sha256_hex(&bytes) == EMBEDDED_SHA256);
+            if !intact {
+                let unpacked = (|| -> std::io::Result<()> {
+                    let mut decoder = zstd::stream::Decoder::new(EMBEDDED)?;
+                    decoder.window_log_max(31)?;
+                    let mut bytes = Vec::with_capacity(110 << 20);
+                    std::io::copy(&mut decoder, &mut bytes)?;
+                    if sha256_hex(&bytes) != EMBEDDED_SHA256 {
+                        return Err(std::io::Error::other("the built-in FFmpeg is damaged"));
+                    }
+                    std::fs::create_dir_all(target.parent().unwrap_or(data_dir))?;
+                    let partial = target.with_extension("part");
+                    std::fs::write(&partial, &bytes)?;
+                    std::fs::rename(&partial, &target)
+                })();
+                if unpacked.is_err() {
+                    return None;
+                }
+            }
+            // Older copies: an earlier built-in one, or a downloaded one.
+            if let Ok(entries) = std::fs::read_dir(target.parent().unwrap_or(data_dir)) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let old = (name.starts_with("ffmpeg-") || name == "ffmpeg.exe") && name.ends_with(".exe") && entry.path() != target;
+                    if old {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            Some(target)
+        })
+        .clone()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// FFmpeg: the one built into Pious, else a copy installed next to Pious
+/// (older installs), else one downloaded later.
 pub fn ffmpeg_path(data_dir: &Path) -> PathBuf {
+    if let Some(path) = unpack_built_in(data_dir) {
+        return path;
+    }
     let bundled = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("ffmpeg.exe")));
     match bundled {
         Some(path) if path.is_file() => path,
         _ => data_dir.join("tools").join("ffmpeg.exe"),
+    }
+}
+
+/// Recording is ready (or will be the moment it's needed), without
+/// touching the disk for the built-in FFmpeg.
+pub fn ffmpeg_ready(data_dir: &Path) -> bool {
+    built_in() || {
+        let bundled = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("ffmpeg.exe")));
+        bundled.is_some_and(|p| p.is_file()) || data_dir.join("tools").join("ffmpeg.exe").is_file()
     }
 }
 
@@ -127,9 +207,10 @@ pub fn probe_encoders(ffmpeg: &Path) -> Vec<String> {
         "libx265",
         "libsvtav1",
     ];
-    CANDIDATES
-        .iter()
-        .filter(|encoder| {
+    // All at once (each is its own short FFmpeg run): checking them one
+    // after another made the first recording of a session take seconds to
+    // start.
+    let works = |encoder: &str| -> bool {
             hidden(Command::new(ffmpeg).args([
                 "-hide_banner",
                 "-loglevel",
@@ -152,9 +233,19 @@ pub fn probe_encoders(ffmpeg: &Path) -> Vec<String> {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-        })
-        .map(|e| (*e).to_owned())
-        .collect()
+    };
+    // One check per graphics vendor at a time (a card allows only so many
+    // encoder sessions at once), the vendors side by side.
+    let groups: Vec<Vec<&str>> = ["nvenc", "amf", "qsv", "lib"]
+        .iter()
+        .map(|kind| CANDIDATES.iter().copied().filter(|e| e.contains(kind)).collect())
+        .collect();
+    let found: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = groups.iter().map(|group| scope.spawn(move || group.iter().filter(|e| works(e)).map(|e| (*e).to_owned()).collect::<Vec<_>>())).collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    // Best first, as listed.
+    CANDIDATES.iter().filter(|c| found.iter().any(|f| f == *c)).map(|e| (*e).to_owned()).collect()
 }
 
 /// The encoder to use: the chosen one, or the best working one for the
@@ -190,6 +281,49 @@ pub struct Source {
     pub offset: (i32, i32),
     /// The game's process, for game-only sound.
     pub game_pid: Option<u32>,
+    /// The size of the monitor the area is on (when known).
+    pub monitor: Option<(u32, u32)>,
+    /// AMD's own capture may be used (off after it failed once).
+    pub amd_capture: bool,
+}
+
+impl Source {
+    /// The area is the whole monitor (a fullscreen or maximized game, or
+    /// "whole monitor" chosen).
+    pub fn whole_monitor(&self) -> bool {
+        let (_, _, w, h) = self.area;
+        // Sizes are rounded down to even numbers for the encoder.
+        self.offset == (0, 0) && self.monitor.is_some_and(|(mw, mh)| mw & !1 == w && mh & !1 == h)
+    }
+}
+
+/// The graphics cards and their driver versions, as one line (what the
+/// working encoders depend on).
+#[cfg(windows)]
+pub fn graphics_cards() -> String {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let mut out = Vec::new();
+    unsafe {
+        if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+            for i in 0..8u32 {
+                let Ok(adapter) = factory.EnumAdapters1(i) else { break };
+                let Ok(desc) = adapter.GetDesc1() else { continue };
+                let name = String::from_utf16_lossy(&desc.Description[..desc.Description.iter().position(|&c| c == 0).unwrap_or(0)]);
+                // The driver's version changes with every driver update.
+                let driver = adapter
+                    .CheckInterfaceSupport(&<windows::Win32::Graphics::Dxgi::IDXGIDevice as windows::core::Interface>::IID)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                out.push(format!("{name}:{:x}:{:x}:{driver}", desc.VendorId, desc.DeviceId));
+            }
+        }
+    }
+    out.join(";")
+}
+
+#[cfg(not(windows))]
+pub fn graphics_cards() -> String {
+    String::new()
 }
 
 /// Finds the monitor (Desktop Duplication output) showing a screen area.
@@ -227,15 +361,17 @@ pub fn locate(area: (i32, i32, u32, u32), whole_monitor: bool, game_pid: Option<
                 area: (ax, ay, aw & !1, ah & !1),
                 offset: (ax - r.left, ay - r.top),
                 game_pid,
+                monitor: Some((monitor.2, monitor.3)),
+                amd_capture: true,
             }
         }
-        None => Source { output: None, area: (x, y, w & !1, h & !1), offset: (0, 0), game_pid },
+        None => Source { output: None, area: (x, y, w & !1, h & !1), offset: (0, 0), game_pid, monitor: None, amd_capture: false },
     }
 }
 
 #[cfg(not(windows))]
 pub fn locate(area: (i32, i32, u32, u32), _whole_monitor: bool, game_pid: Option<u32>) -> Source {
-    Source { output: None, area, offset: (0, 0), game_pid }
+    Source { output: None, area, offset: (0, 0), game_pid, monitor: None, amd_capture: false }
 }
 
 /// A finished segment: its file and where it sits in the stream (seconds).
@@ -250,12 +386,15 @@ struct Segment {
 pub struct Session {
     child: Child,
     gpu_capture: bool,
+    /// Captured with AMD's own capture (see `Session::start`).
+    amd_capture: bool,
     dir: PathBuf,
     started: Instant,
     ffmpeg: PathBuf,
     container: Container,
     audio_codec: AudioCodec,
     tracks: usize,
+    hevc: bool,
     segments: Vec<Segment>,
     /// How far into the stream FFmpeg was when the session started
     /// (wall-clock seconds minus stream seconds; the smallest seen).
@@ -289,6 +428,10 @@ impl Session {
         self.gpu_capture
     }
 
+    pub fn uses_amd_capture(&self) -> bool {
+        self.amd_capture
+    }
+
     pub fn start(ffmpeg: &Path, work: &Path, settings: &Recorder, encoder: &str, source: &Source) -> Result<Session, String> {
         let dir = work.join(format!("session-{}", chrono::Utc::now().timestamp_millis()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make a folder for the recording ({e})."))?;
@@ -306,7 +449,30 @@ impl Session {
         let fps = settings.fps.clamp(10, 240);
         let (_, _, w, h) = source.area;
         let hardware_frames;
+        // AMD's encoder can't take Desktop Duplication's frames on the GPU,
+        // so they used to be copied to the processor, converted and copied
+        // back: on an AMD laptop chip that used more than a whole core and
+        // still dropped to ~43 of 60 frames a second. AMD's own capture
+        // hands its frames straight to the encoder (60 of 60, a quarter of
+        // the processor time). It only captures whole monitors.
+        let amd_direct = source.amd_capture
+            && encoder.contains("amf")
+            && !settings.ten_bit
+            && source.output.is_some()
+            && source.whole_monitor();
         match source.output {
+            Some(index) if amd_direct => {
+                hardware_frames = true;
+                args.extend([
+                    "-f".into(),
+                    "lavfi".into(),
+                    "-i".into(),
+                    // "get_current" hands over the newest picture at once
+                    // (the default mode waits and falls short of the frame
+                    // rate); the fps filter below makes it steady.
+                    format!("vsrc_amf=monitor_index={index}:framerate={fps}:capture_mode=get_current"),
+                ]);
+            }
             Some(index) => {
                 hardware_frames = true;
                 let (ox, oy) = source.offset;
@@ -359,14 +525,21 @@ impl Session {
         // only NVIDIA's takes them straight from the GPU.
         let gpu_direct = hardware_frames && settings.height.is_none() && !settings.ten_bit && encoder.contains("nvenc");
         let mut filters: Vec<String> = Vec::new();
-        if hardware_frames && !gpu_direct {
+        if amd_direct {
+            filters.push(format!("fps={fps}"));
+            if let Some(height) = settings.height.filter(|&t| t < h) {
+                filters.push(format!("vpp_amf=w=-2:h={height}"));
+            }
+        } else if hardware_frames && !gpu_direct {
             filters.push("hwdownload".into());
             filters.push("format=bgra".into());
         }
-        if let Some(height) = settings.height.filter(|&t| t < h) {
-            filters.push(format!("scale=-2:{height}:flags=bicubic"));
+        if !amd_direct {
+            if let Some(height) = settings.height.filter(|&t| t < h) {
+                filters.push(format!("scale=-2:{height}:flags=bicubic"));
+            }
         }
-        if !gpu_direct {
+        if !gpu_direct && !amd_direct {
             filters.push(format!("format={}", if settings.ten_bit { "p010le" } else { "nv12" }));
         }
         if encoder.contains("qsv") && !gpu_direct {
@@ -421,7 +594,17 @@ impl Session {
 
         let log = dir.join("ffmpeg.log");
         let log_file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-        let child = hidden(Command::new(ffmpeg).args(&args))
+        let mut command = Command::new(ffmpeg);
+        // Below normal priority: the game comes first. (The heavy work is
+        // on the graphics card; this only keeps FFmpeg's own threads from
+        // competing with Roblox's.)
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+            command.creation_flags(NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        }
+        let child = command.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(log_file)
@@ -431,12 +614,14 @@ impl Session {
         Ok(Session {
             child,
             gpu_capture: source.output.is_some(),
+            amd_capture: amd_direct,
             dir,
             started: Instant::now(),
             ffmpeg: ffmpeg.to_owned(),
             container: settings.container,
             audio_codec: settings.audio_codec,
             tracks: pipes.len(),
+            hevc: encoder.contains("hevc") || encoder.contains("x265"),
             segments: Vec::new(),
             lag: None,
             csv_read: 0,
@@ -462,11 +647,22 @@ impl Session {
     /// Picks up newly finished segments and deletes ones the buffer no
     /// longer needs. Call every few hundred milliseconds.
     pub fn poll(&mut self) {
-        let Ok(file) = std::fs::File::open(self.dir.join("segments.csv")) else { return };
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(self.dir.join("segments.csv")) else { return };
         let now = self.started.elapsed().as_secs_f64();
-        let lines: Vec<String> = std::io::BufReader::new(file).lines().map_while(Result::ok).collect();
-        for line in lines.iter().skip(self.csv_read) {
-            let parts: Vec<&str> = line.split(',').collect();
+        // Only what's new since last time (the list grows for as long as
+        // the capture runs; reading it whole every few hundred ms added up).
+        if file.seek(SeekFrom::Start(self.csv_read as u64)).is_err() {
+            return;
+        }
+        let mut fresh = String::new();
+        if file.read_to_string(&mut fresh).is_err() {
+            return;
+        }
+        // A line still being written waits for the next poll.
+        let complete = fresh.rfind('\n').map_or(0, |i| i + 1);
+        for line in fresh[..complete].lines() {
+            let parts: Vec<&str> = line.trim_end_matches('\r').split(',').collect();
             if parts.len() < 3 {
                 continue;
             }
@@ -475,7 +671,7 @@ impl Session {
             self.lag = Some(self.lag.map_or(lag, |l: f64| l.min(lag)));
             self.segments.push(Segment { file: self.dir.join(parts[0]), start, end });
         }
-        self.csv_read = lines.len();
+        self.csv_read += complete;
 
         let stream_now = self.stream_time(Instant::now());
         let mut oldest_needed = stream_now - self.buffer_seconds as f64 - SEGMENT_SECONDS * 2.0;
@@ -521,6 +717,8 @@ impl Session {
             length: (to - from).max(0.5),
             container: self.container,
             aac: self.tracks > 0 && self.audio_codec == AudioCodec::Aac,
+            hevc: self.hevc,
+            opus: self.tracks > 0 && self.audio_codec == AudioCodec::Opus,
         })
     }
 
@@ -570,6 +768,8 @@ pub struct CutJob {
     length: f64,
     container: Container,
     aac: bool,
+    hevc: bool,
+    opus: bool,
 }
 
 impl CutJob {
@@ -613,7 +813,17 @@ impl CutJob {
             if self.aac {
                 args.extend(["-bsf:a".into(), "aac_adtstoasc".into()]);
             }
-            args.extend(["-movflags".into(), "+faststart".into()]);
+            // No "+faststart": it rewrites the whole file a second time to
+            // move the index to the front, which only helps streaming over
+            // the web and doubled the time long recordings took to save.
+            // HEVC in MP4/MOV plays in more players tagged hvc1.
+            if self.hevc {
+                args.extend(["-tag:v".into(), "hvc1".into()]);
+            }
+            // Opus in MP4/MOV is still marked experimental in FFmpeg.
+            if self.opus {
+                args.extend(["-strict".into(), "experimental".into()]);
+            }
         }
         args.push(out.display().to_string());
         let output = hidden(Command::new(&self.ffmpeg).args(&args)).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
@@ -646,7 +856,9 @@ fn encoder_args(s: &Recorder, encoder: &str, fps: u32) -> Vec<String> {
             RateControl::Cbr => push(&["-rc", "cbr", "-b:v", &b, "-bufsize", &buf]),
         }
     } else if encoder.contains("amf") {
-        push(&["-quality", ["speed", "speed", "balanced", "quality", "quality"][speed], "-usage", "transcoding"]);
+        // Low latency: frames leave the encoder as they come instead of
+        // queuing (what a live capture wants; measured at full frame rate).
+        push(&["-quality", ["speed", "speed", "balanced", "quality", "quality"][speed], "-usage", "lowlatency"]);
         match s.rate_control {
             RateControl::Quality => push(&["-rc", "cqp", "-qp_i", &q, "-qp_p", &q, "-qp_b", &q]),
             RateControl::Vbr => push(&["-rc", "vbr_peak", "-b:v", &b, "-maxrate", &max]),
@@ -1017,5 +1229,60 @@ mod tests {
         let hevc = Recorder { codec: VideoCodec::Hevc, ..Recorder::default() };
         // No HEVC encoder: falls back to H.264.
         assert_eq!(pick_encoder(&hevc, &available).as_deref(), Some("h264_nvenc"));
+    }
+
+    #[test]
+    fn built_in_ffmpeg_unpacks_and_runs() {
+        if !built_in() {
+            eprintln!("this build has no FFmpeg inside (no installer\\vendor\\ffmpeg.exe)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pious-ffmpeg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = unpack_built_in(&dir).expect("unpacked");
+        assert!(path.starts_with(&dir));
+        let output = hidden(Command::new(&path).arg("-version")).output().unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("ffmpeg version"));
+        assert!(ffmpeg_ready(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whole_monitor_areas_only() {
+        let mut source = Source { output: Some(0), area: (0, 0, 1920, 1080), offset: (0, 0), game_pid: None, monitor: Some((1920, 1080)), amd_capture: true };
+        assert!(source.whole_monitor());
+        source.monitor = Some((1921, 1081));
+        assert!(source.whole_monitor(), "odd sizes are rounded down for the encoder");
+        source.area = (100, 50, 1280, 720);
+        source.offset = (100, 50);
+        assert!(!source.whole_monitor());
+    }
+
+    /// A real capture of the main monitor with the best encoder this PC
+    /// has: segments must appear and keep up with the frame rate. Needs a
+    /// screen and FFmpeg (`installer\vendor\ffmpeg.exe` or PIOUS_FFMPEG):
+    /// `cargo test --bin pious -- --ignored real_capture`.
+    #[test]
+    #[ignore]
+    fn real_capture() {
+        let ffmpeg = std::env::var_os("PIOUS_FFMPEG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("installer").join("vendor").join("ffmpeg.exe"));
+        assert!(ffmpeg.is_file(), "no FFmpeg at {}", ffmpeg.display());
+        let encoders = probe_encoders(&ffmpeg);
+        let settings = Recorder { fps: 60, ..Recorder::default() };
+        let encoder = pick_encoder(&settings, &encoders).expect("an encoder");
+        let source = locate((0, 0, 1, 1), true, None);
+        let work = std::env::temp_dir().join(format!("pious-capture-{}", std::process::id()));
+        let mut session = Session::start(&ffmpeg, &work, &settings, &encoder, &source).unwrap();
+        std::thread::sleep(Duration::from_secs(9));
+        session.check().unwrap();
+        session.poll();
+        let covered: f64 = session.segments.iter().map(|s| s.end - s.start).sum();
+        let log = std::fs::read_to_string(&session.log).unwrap_or_default();
+        println!("encoder {encoder}, AMD capture {}, {covered:.1}s in {} segments\n{log}", session.uses_amd_capture(), session.segments.len());
+        assert!(covered >= 4.0, "only {covered:.1}s captured");
+        session.discard();
+        let _ = std::fs::remove_dir_all(&work);
     }
 }

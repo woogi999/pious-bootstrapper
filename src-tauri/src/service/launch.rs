@@ -1,7 +1,6 @@
 //! Starting Roblox: Play, private servers, server hops, joining players and
 //! links opened from the browser.
 
-use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -33,6 +32,10 @@ pub struct LaunchPlan {
     /// A private server link to join directly, without saving it.
     #[serde(default)]
     pub link: Option<String>,
+    /// Where to join a public server: "auto", "best_ping" or a region ID
+    /// (see `core::region`). `None` uses the setting.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 /// What happened when asked to launch.
@@ -79,6 +82,7 @@ impl Service {
                 pin_account: false,
                 force,
                 link: None,
+                region: None,
             }
         };
         self.launch(plan)
@@ -93,7 +97,6 @@ impl Service {
     }
 
     pub fn launch(self: &Shared, plan: LaunchPlan) -> LaunchOutcome {
-        let mods_dir = crate::core::tweaks::mods_dir(&crate::core::store::data_dir());
         let prepared = self.mutate(|s| -> Result<Prepared, LaunchOutcome> {
             let library = &s.bootstrapper;
             let game = library.game(plan.game).cloned().ok_or(LaunchOutcome::Stopped)?;
@@ -148,12 +151,11 @@ impl Service {
                 .as_deref()
                 .and_then(|name| s.bootstrappers.iter().find(|b| b.name == name))
                 .map(|b| b.exe.clone());
-            // Pious's tweaks go on the build it starts itself, unless another
-            // window is already running that build.
+            // Pious's tweaks go on the build it starts itself, also when another
+            // window runs that build (Roblox only reads these files as it
+            // needs them; a file that's in use is reported, not skipped).
             let tweaks = match (&via, &version) {
-                (None, Some(v)) if !s.instances.iter().any(|i| i.version.as_deref() == Some(v.hash.as_str())) => {
-                    Some((v.path.clone(), library.preferences.tweaks.clone()))
-                }
+                (None, Some(v)) => Some((v.path.clone(), library.preferences.tweaks.clone())),
                 _ => None,
             };
 
@@ -186,6 +188,11 @@ impl Service {
                 s.instances.retain(|i| i.id != old.id);
             }
             let settings_for = Some(account.custom_settings.then_some(account.id));
+            // A public server picked by region or ping (not when joining
+            // someone, a link or a private server).
+            let region = (server_link.is_none() && plan.job.is_none())
+                .then(|| plan.region.clone().unwrap_or_else(|| library.preferences.region.clone()))
+                .filter(|r| !r.is_empty() && r != "auto");
             let behavior = library.preferences.on_game_launch;
 
             // Remember the choice and update recents.
@@ -258,6 +265,9 @@ impl Service {
                 },
                 tweaks,
                 Extras {
+                    region,
+                    place_id: game.place_id,
+                    account: account.id,
                     placement,
                     settings_for,
                     behavior,
@@ -299,25 +309,9 @@ impl Service {
                 }
             }
             // Tweaks kept in Roblox's settings file (the frame rate cap…).
-            let settings_values = tweaks.as_ref().map(|(_, t)| crate::core::tweaks::settings_values(t)).unwrap_or_default();
+            let settings_tweaks = tweaks.as_ref().map(|(_, t)| t.clone());
             if let Some((build, tweaks)) = tweaks {
-                let cache = crate::core::store::data_dir().join("cache").join("mods");
-                let presets = match crate::core::tweaks::preset_mods(&tweaks, &cache, &build).await {
-                    Ok(presets) => presets,
-                    Err(error) => {
-                        s.toast(Tone::Caution, error);
-                        Vec::new()
-                    }
-                };
-                let applied = tokio::task::spawn_blocking(move || {
-                    let applied = crate::core::tweaks::apply(&build, &tweaks, &mods_dir, presets);
-                    crate::core::fscache::refresh([crate::core::tweaks::applied_marker(&build)]);
-                    applied
-                })
-                .await;
-                if let Ok(Err(error)) = applied {
-                    s.toast(Tone::Caution, format!("Tweaks weren't applied: {error}"));
-                }
+                s.apply_tweaks_to(build, tweaks).await;
             }
             // The account's own Roblox settings (or the PC's).
             if let Some(account) = extras.settings_for {
@@ -331,15 +325,19 @@ impl Service {
             }
             // After the account's settings are in place, so they aren't
             // swapped back out.
-            if !settings_values.is_empty() {
+            // Also puts back values a tweak no longer wants (or all of them,
+            // with tweaks off).
+            if let Some(settings_tweaks) = settings_tweaks {
                 let applied = tokio::task::spawn_blocking(move || {
-                    let values: Vec<(&str, crate::core::robloxsettings::Kind, String)> = settings_values.into_iter().collect();
-                    crate::core::robloxsettings::apply_live(&values)
+                    crate::core::tweaks::apply_settings(&settings_tweaks, &crate::core::store::data_dir())
                 })
                 .await;
                 if let Ok(Err(error)) = applied {
                     s.toast(Tone::Caution, error);
                 }
+            }
+            if let Some(choice) = extras.region.clone() {
+                s.pick_region_server(&choice, extras.account, extras.place_id, id, &mut request).await;
             }
             let result = launcher::launch(request).await;
             if let (Ok(launched), Some(placement)) = (&result, extras.placement) {
@@ -385,6 +383,10 @@ impl Service {
                 let tracked = self.mutate(|s| match s.instances.iter_mut().find(|i| i.id == id) {
                     Some(instance) => {
                         instance.pid = launched.pid;
+                        // To tell a crash from a normal close later.
+                        if let Some(pid) = launched.pid {
+                            process::keep_exit_code(pid);
+                        }
                         instance.status =
                             if launched.pid.is_some() { InstanceStatus::Running } else { InstanceStatus::Untracked };
                         true
@@ -450,6 +452,45 @@ impl Service {
         self.sync_presence().await;
     }
 
+    /// Auto arrange: lays every Roblox window (Pious's first, oldest first,
+    /// then any others) out over the screens. Returns how many were moved.
+    pub async fn arrange_windows(self: &Shared, layout: Option<String>) -> Result<usize, String> {
+        use crate::core::arrange::{Rect, layout as plan};
+        let (kind, mut pids) = {
+            let s = self.read();
+            let kind = layout.unwrap_or_else(|| s.bootstrapper.preferences.arrange_layout.clone());
+            let mut ours: Vec<&Instance> = s.instances.iter().filter(|i| i.pid.is_some()).collect();
+            ours.sort_by_key(|i| i.started);
+            (kind, ours.into_iter().filter_map(|i| i.pid).collect::<Vec<u32>>())
+        };
+        let screens: Vec<Rect> = self
+            .app()
+            .available_monitors()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|m| {
+                let area = m.work_area();
+                Rect { x: area.position.x, y: area.position.y, width: area.size.width as i32, height: area.size.height as i32 }
+            })
+            .collect();
+        let moved = tokio::task::spawn_blocking(move || {
+            for pid in process::roblox_pids() {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+            pids.retain(|&pid| process::window_of(pid).is_some());
+            let rects = plan(pids.len(), &screens, &kind);
+            pids.iter().zip(rects).filter(|(pid, r)| process::move_to(**pid, r.x, r.y, r.width, r.height)).count()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if moved == 0 {
+            return Err("There's no Roblox window to arrange.".into());
+        }
+        Ok(moved)
+    }
+
     pub async fn close_all(self: &Shared) {
         let ids: Vec<Uuid> = self.read().instances.iter().map(|i| i.id).collect();
         for id in ids {
@@ -495,9 +536,8 @@ impl Service {
             }
         };
         let choice = {
-            let mut rng = rand::thread_rng();
             let others: Vec<_> = servers.iter().filter(|s| Some(&s.job) != current.as_ref()).collect();
-            others.choose(&mut rng).map(|s| s.job.clone())
+            crate::core::random::pick(&others).map(|s| s.job.clone())
         };
         let Some(job) = choice else {
             self.toast(Tone::Caution, "There's no other server with room right now.");
@@ -533,6 +573,7 @@ impl Service {
             // asks first if its account is busy elsewhere.
             force: force || instance.is_some(),
             link: None,
+            region: None,
         })
     }
 
@@ -599,6 +640,7 @@ impl Service {
             pin_account: false,
             force: true,
             link: current.plan.as_ref().and_then(|p| p.link.clone()),
+            region: None,
         });
         if matches!(outcome, LaunchOutcome::Started) {
             self.close_instance(current.id).await;
@@ -626,6 +668,7 @@ impl Service {
             pin_account: false,
             force,
             link: None,
+            region: None,
         })
     }
 
@@ -674,6 +717,11 @@ impl Service {
                 process::set_multi_instance(s.bootstrapper.preferences.multi_instance);
             });
             self.toast(Tone::Active, "Starting Roblox from your browser");
+            // Tweaks go on games started from the website too (they used to
+            // apply only to games started from Pious's library).
+            let tweaks = self.read().bootstrapper.preferences.tweaks.clone();
+            self.apply_tweaks_to(version.path.clone(), tweaks.clone()).await;
+            let _ = tokio::task::spawn_blocking(move || crate::core::tweaks::apply_settings(&tweaks, &crate::core::store::data_dir())).await;
             let result = launcher::launch_web(web, version.executable()).await;
             self.launched(id, result).await;
             return;
@@ -715,6 +763,10 @@ type Prepared = (LaunchRequest, Uuid, String, Option<(std::path::PathBuf, crate:
 
 /// What else a launch does around starting the client.
 struct Extras {
+    /// Join a server by region or ping ("best_ping" or a region ID).
+    region: Option<String>,
+    place_id: u64,
+    account: Uuid,
     /// Where the window it replaces was.
     placement: Option<process::Placement>,
     /// Whose Roblox settings to load (`Some(None)` = the PC's own).
@@ -726,6 +778,56 @@ struct Extras {
 }
 
 impl Service {
+    /// Puts the tweaks (and enabled plugins' Roblox files) on a build right
+    /// before it starts. Every launch path goes through here: games from
+    /// the library, joins, links, and Play on roblox.com.
+    pub(super) async fn apply_tweaks_to(&self, build: std::path::PathBuf, tweaks: crate::core::model::Tweaks) {
+        let mods_dir = crate::core::tweaks::mods_dir(&crate::core::store::data_dir());
+        let cache = crate::core::store::data_dir().join("cache").join("mods");
+        let presets = match crate::core::tweaks::preset_mods(&tweaks, &cache, &build).await {
+            Ok(presets) => presets,
+            Err(error) => {
+                self.toast(Tone::Caution, error);
+                Vec::new()
+            }
+        };
+        // Client files from enabled plugins (only while tweaks are on).
+        let enabled = self.read().bootstrapper.preferences.plugins.clone();
+        let on = tweaks.enabled;
+        let plugin_files = tokio::task::spawn_blocking(move || if on { super::plugins::client_files(&enabled) } else { Vec::new() })
+            .await
+            .unwrap_or_default();
+        let applied = tokio::task::spawn_blocking(move || {
+            let applied = crate::core::tweaks::apply(&build, &tweaks, &mods_dir, presets, plugin_files);
+            crate::core::fscache::refresh([crate::core::tweaks::applied_marker(&build)]);
+            applied
+        })
+        .await;
+        if let Ok(Err(error)) = applied {
+            self.toast(Tone::Caution, format!("Tweaks weren't applied: {error}"));
+        }
+    }
+
+    /// Finds the public server to join by region or ping (see
+    /// `core::region`). Without one, Roblox picks as usual.
+    async fn pick_region_server(&self, choice: &str, account: Uuid, place_id: u64, id: Uuid, request: &mut LaunchRequest) {
+        let Ok(Ok(token)) = tokio::task::spawn_blocking(move || credentials::load_session(account)).await else { return };
+        let found = tokio::time::timeout(std::time::Duration::from_secs(25), crate::core::region::pick(choice, &token, place_id)).await;
+        match found {
+            Ok(Ok((job, what))) => {
+                request.job = Some(job.clone());
+                self.mutate(|s| {
+                    if let Some(instance) = s.instances.iter_mut().find(|i| i.id == id) {
+                        instance.job = Some(job);
+                    }
+                });
+                self.toast(Tone::Neutral, format!("Joining {what}"));
+            }
+            Ok(Err(why)) => self.toast(Tone::Caution, format!("Roblox picks the server: {why}.")),
+            Err(_) => self.toast(Tone::Caution, "Finding a server took too long, so Roblox picks one."),
+        }
+    }
+
     /// Gets Pious out of the way once a game has started, if wanted.
     fn after_game_started(&self, behavior: crate::core::model::LaunchBehavior) {
         use crate::core::model::LaunchBehavior;
@@ -759,6 +861,7 @@ impl Service {
             pin_account: false,
             force,
             link: None,
+            region: None,
         })
     }
 
@@ -790,6 +893,7 @@ impl Service {
             pin_account: false,
             force,
             link: Some(link),
+            region: None,
         })
     }
 

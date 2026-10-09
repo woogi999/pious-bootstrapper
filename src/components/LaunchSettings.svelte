@@ -75,8 +75,23 @@
 <section class="group">
   <span class="label">Launching</span>
   <div class="glass list">
-    <SettingRow icon="copy" title="Multi-instance" description="Allow several Roblox clients to run at the same time.">
-      <Switch on={prefs.multi_instance} onchange={(on) => setPreferences({ multi_instance: on })} />
+    <SettingRow
+      icon="copy"
+      title="Multi-instance"
+      description="Allow several Roblox clients to run at the same time. Ban risk: Roblox doesn't support it and some games kick or ban for it. Use at your own risk."
+    >
+      <Switch
+        on={prefs.multi_instance}
+        onchange={(on) =>
+          on
+            ? app.confirm(
+                "Turn on multi-instance?",
+                "Roblox doesn't support running several clients at once, and Roblox or a game's own anti-cheat may kick or ban accounts that do (especially for farming or AFK play). Pious can't prevent that and isn't responsible for bans or lost items. Only turn it on if you accept the risk.",
+                "I understand, turn it on",
+                () => setPreferences({ multi_instance: true }),
+              )
+            : setPreferences({ multi_instance: false })}
+      />
     </SettingRow>
     <hr class="divider" />
     <SettingRow
@@ -155,11 +170,28 @@
       <Switch on={prefs.pious_presence} disabled={noPresence} onchange={(on) => setPreferences({ pious_presence: on })} />
     </SettingRow>
     <hr class="divider" />
+    <SettingRow
+      icon="chat"
+      title="Show as"
+      description="The app your game status comes from: its name heads the card on your profile and its logo shows when the game has no picture. Pious's own idle status always shows as Pious."
+      off={noPresence}
+    >
+      <Select
+        options={[
+          { value: "Roblox" as const, label: "Roblox" },
+          { value: "Pious" as const, label: "Pious" },
+        ]}
+        value={prefs.discord_app}
+        onchange={(discord_app) => setPreferences({ discord_app })}
+        width="210px"
+      />
+    </SettingRow>
+    <hr class="divider" />
     <SettingRow icon="edit" title="Activity name" description="What your Discord profile says you're playing." off={noPresence}>
       <Select
         options={[
           { value: "GameName" as const, label: "Playing <game name>" },
-          { value: "Pious" as const, label: "Playing Pious" },
+          { value: "Pious" as const, label: `Playing ${prefs.discord_app === "Pious" ? "Pious" : "Roblox"}` },
         ]}
         value={prefs.discord_display}
         onchange={(discord_display) => setPreferences({ discord_display })}

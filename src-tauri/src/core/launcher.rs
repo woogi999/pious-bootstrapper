@@ -68,7 +68,7 @@ pub async fn launch(request: LaunchRequest) -> Result<Launched, LaunchError> {
         }
     })?;
 
-    let browser_tracker: u64 = rand::random::<u64>() % 900_000_000_000 + 100_000_000_000;
+    let browser_tracker: u64 = crate::core::random::u64() % 900_000_000_000 + 100_000_000_000;
 
     let place_launcher = match (&request.server, &request.job) {
         (None, Some(job)) => format!(

@@ -25,7 +25,12 @@ Pious keeps a backup of the app's settings file next to it
 | Codex | `%USERPROFILE%\.codex\config.toml` |
 
 These apps start `pious.exe --mcp`, which passes messages to the running
-Pious (and starts Pious in the tray if it isn't running).
+Pious. AI apps start every MCP server they know as soon as they open, so
+this **never starts Pious by itself**: while Pious is closed it answers the
+app's handshake and tool list on its own (so the app connects at once),
+and tool calls say Pious isn't running. Turn on **Start Pious when an AI
+app needs it** (Settings → Plugins) to let an actual tool call start Pious
+in the tray.
 
 ## ChatGPT
 

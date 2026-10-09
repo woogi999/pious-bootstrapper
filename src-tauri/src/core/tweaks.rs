@@ -50,8 +50,15 @@ pub fn fast_flags(tweaks: &Tweaks) -> Result<Map<String, Value>, String> {
         GraphicsApi::Vulkan => set("FFlagDebugGraphicsPreferVulkan", "True"),
         GraphicsApi::OpenGL => set("FFlagDebugGraphicsPreferOpenGL", "True"),
     }
-    if tweaks.msaa > 0 {
+    if tweaks.msaa_off {
+        set("FIntDebugForceMSAASamples", "0");
+    } else if tweaks.msaa > 0 {
         set("FIntDebugForceMSAASamples", &tweaks.msaa.to_string());
+    }
+    if let Some(level) = tweaks.render_quality {
+        // The old hidden quality setting: 21 steps, below Roblox's lowest
+        // and above its highest slider position.
+        set("DFIntDebugFRMQualityLevelOverride", &level.clamp(1, 21).to_string());
     }
     if let Some(quality) = tweaks.texture_quality {
         set("DFFlagTextureQualityOverrideEnabled", "True");
@@ -71,6 +78,11 @@ pub fn fast_flags(tweaks: &Tweaks) -> Result<Map<String, Value>, String> {
     }
     if tweaks.still_grass {
         set("FIntGrassMovementReducedMotionFactor", "0");
+    }
+    if tweaks.no_grass {
+        set("FIntFRMMinGrassDistance", "0");
+        set("FIntFRMMaxGrassDistance", "0");
+        set("FIntRenderGrassDetailStrands", "0");
     }
     if let Some(detail) = tweaks.mesh_detail {
         let distance = [0, 100, 250, 500, 1000][detail.min(4) as usize].to_string();
@@ -112,18 +124,146 @@ pub fn settings_values(tweaks: &Tweaks) -> Vec<(&'static str, crate::core::roblo
     out
 }
 
+/// The values Roblox's settings file had before Pious changed them, so
+/// turning a tweak (or all of them) off puts them back.
+fn settings_record(data_dir: &Path) -> PathBuf {
+    data_dir.join("tweaks-settings.json")
+}
+
+type SettingsRecord = BTreeMap<String, (crate::core::robloxsettings::Kind, Option<String>)>;
+
+fn load_record(data_dir: &Path) -> SettingsRecord {
+    std::fs::read(settings_record(data_dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_record(data_dir: &Path, record: &SettingsRecord) -> Result<(), String> {
+    let path = settings_record(data_dir);
+    if record.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return Ok(());
+    }
+    let json = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
+    let partial = path.with_extension("json.part");
+    std::fs::write(&partial, json).and_then(|_| std::fs::rename(&partial, &path)).map_err(|e| format!("Couldn't save the tweaks record ({e})."))
+}
+
+/// Puts the tweaks that live in Roblox's settings file in place (right
+/// before a game starts), remembering each original value first, and puts
+/// back the originals of tweaks that are no longer wanted.
+pub fn apply_settings(tweaks: &Tweaks, data_dir: &Path) -> Result<(), String> {
+    use crate::core::robloxsettings::{apply_live, live_value};
+    let wanted = settings_values(tweaks);
+    let mut record = load_record(data_dir);
+    for (name, kind, _) in &wanted {
+        if !record.contains_key(*name) {
+            record.insert((*name).to_owned(), (*kind, live_value(name, *kind)));
+        }
+    }
+    // Saved before anything changes, so a crash can't lose an original.
+    save_record(data_dir, &record)?;
+    let mut values: Vec<(&str, crate::core::robloxsettings::Kind, String)> = wanted.clone();
+    let mut removed = Vec::new();
+    let mut done = Vec::new();
+    for (name, (kind, original)) in &record {
+        if wanted.iter().any(|(n, ..)| n == name) {
+            continue;
+        }
+        match original {
+            Some(original) => values.push((name.as_str(), *kind, original.clone())),
+            // It wasn't there before: it goes again.
+            None => removed.push((name.as_str(), *kind)),
+        }
+        done.push(name.clone());
+    }
+    apply_live(&values)?;
+    crate::core::robloxsettings::remove_live(&removed)?;
+    for name in done {
+        record.remove(&name);
+    }
+    save_record(data_dir, &record)
+}
+
+/// Puts back every value of Roblox's settings file that tweaks changed.
+/// `keep_record`: a Roblox window is open and will write its own copy back
+/// when it closes, so the originals are kept to put back again next time.
+pub fn restore_settings(data_dir: &Path, keep_record: bool) -> Result<(), String> {
+    let record = load_record(data_dir);
+    let values: Vec<(&str, crate::core::robloxsettings::Kind, String)> =
+        record.iter().filter_map(|(name, (kind, original))| Some((name.as_str(), *kind, original.clone()?))).collect();
+    let added: Vec<(&str, crate::core::robloxsettings::Kind)> =
+        record.iter().filter(|(_, (_, original))| original.is_none()).map(|(name, (kind, _))| (name.as_str(), *kind)).collect();
+    crate::core::robloxsettings::apply_live(&values)?;
+    crate::core::robloxsettings::remove_live(&added)?;
+    if !keep_record {
+        save_record(data_dir, &SettingsRecord::new())?;
+    }
+    Ok(())
+}
+
 /// Where mod-preset files come from (Fishstrap's open-source resources).
 const PRESET_SOURCE: &str = "https://raw.githubusercontent.com/fishstrap/fishstrap/main/Bloxstrap/Resources/Mods";
+
+/// Voidstrap's cursor set (MIT).
+const VOIDSTRAP_CURSORS: &str = "https://raw.githubusercontent.com/KloBraticc/Voidstrap/main/src/Voidstrap.App/Resources/Mods/Cursor";
+/// Froststrap's cursor set (MPL-2.0).
+const FROSTSTRAP_CURSORS: &str = "https://raw.githubusercontent.com/Froststrap/Froststrap/main/Froststrap/Resources/Mods/Cursor";
+
+/// Where a cursor style's pictures come from: (base URL, folder, files
+/// besides the pointer and the far pointer).
+pub fn cursor_source(style: CursorStyle) -> Option<(String, &'static str, &'static [&'static str])> {
+    const DECAL: &[&str] = &["ArrowCursorDecalDrag.png"];
+    const IBEAM: &[&str] = &["IBeamCursor.png"];
+    let fish = || format!("{PRESET_SOURCE}/Cursor");
+    let void = || VOIDSTRAP_CURSORS.to_owned();
+    let frost = || FROSTSTRAP_CURSORS.to_owned();
+    Some(match style {
+        CursorStyle::Default => return None,
+        CursorStyle::From2006 => (fish(), "From2006", &[]),
+        CursorStyle::From2013 => (fish(), "From2013", &[]),
+        CursorStyle::BibataModernIce => (void(), "BibataModernIce", &["ArrowCursorDecalDrag.png", "IBeamCursor.png"]),
+        CursorStyle::Clean => (void(), "CleanCursor", DECAL),
+        CursorStyle::Dot => (void(), "DotCursor", DECAL),
+        CursorStyle::Fps => (void(), "FPSCursor", DECAL),
+        CursorStyle::Stoofs => (void(), "StoofsCursor", DECAL),
+        CursorStyle::VerySmallWhiteDot => (void(), "VerySmallWhiteDot", DECAL),
+        CursorStyle::WhiteDot => (void(), "WhiteDotCursor", DECAL),
+        CursorStyle::BlackAndWhiteDot => (frost(), "BlackAndWhiteDot", IBEAM),
+        CursorStyle::PurpleCross => (frost(), "PurpleCross", IBEAM),
+    })
+}
+
+/// Every cursor style with its name, for the picker.
+pub const CURSORS: [(CursorStyle, &str); 12] = [
+    (CursorStyle::Default, "Roblox's"),
+    (CursorStyle::From2013, "2013 (classic)"),
+    (CursorStyle::From2006, "2006 (oldest)"),
+    (CursorStyle::BibataModernIce, "Bibata Modern Ice"),
+    (CursorStyle::Clean, "Clean"),
+    (CursorStyle::Dot, "Dot"),
+    (CursorStyle::Fps, "FPS crosshair"),
+    (CursorStyle::Stoofs, "Stoofs"),
+    (CursorStyle::VerySmallWhiteDot, "Tiny white dot"),
+    (CursorStyle::WhiteDot, "White dot"),
+    (CursorStyle::BlackAndWhiteDot, "Black and white dot"),
+    (CursorStyle::PurpleCross, "Purple cross"),
+];
 
 /// The mod-preset files these tweaks need: (path in the build, source URL).
 fn preset_files(tweaks: &Tweaks) -> Vec<(String, String)> {
     let mut files = Vec::new();
     let mut add = |target: &str, source: String| files.push((target.to_owned(), source));
     let cursors = "content/textures/Cursors/KeyboardMouse";
-    if tweaks.cursor != CursorStyle::Default {
-        let year = if tweaks.cursor == CursorStyle::From2006 { "From2006" } else { "From2013" };
-        add(&format!("{cursors}/ArrowCursor.png"), format!("{PRESET_SOURCE}/Cursor/{year}/ArrowCursor.png"));
-        add(&format!("{cursors}/ArrowFarCursor.png"), format!("{PRESET_SOURCE}/Cursor/{year}/ArrowFarCursor.png"));
+    if let Some((base, folder, extra)) = cursor_source(tweaks.cursor) {
+        add(&format!("{cursors}/ArrowCursor.png"), format!("{base}/{folder}/ArrowCursor.png"));
+        add(&format!("{cursors}/ArrowFarCursor.png"), format!("{base}/{folder}/ArrowFarCursor.png"));
+        for file in extra {
+            let target = match *file {
+                // Dragging decals uses the one in the textures folder itself.
+                "ArrowCursorDecalDrag.png" => format!("content/textures/{file}"),
+                _ => format!("{cursors}/{file}"),
+            };
+            add(&target, format!("{base}/{folder}/{file}"));
+        }
     }
     if tweaks.old_character_sounds {
         for (target, source) in [
@@ -170,19 +310,36 @@ pub async fn preset_mods(tweaks: &Tweaks, cache: &Path, build: &Path) -> Result<
         let base = tokio::fs::read(&source).await.map_err(|e| format!("Couldn't read Roblox's emoji font ({e})."))?;
         out.push((relative.to_owned(), fonts::apple_emoji_font(base, cache).await?));
     }
+    if let Some(sky) = tweaks.skybox.clone() {
+        let (folder, cache) = (tweaks.skybox_folder.clone(), cache.to_path_buf());
+        let faces = tokio::task::spawn_blocking(move || crate::core::skybox::files(&sky, folder.as_deref(), &cache))
+            .await
+            .map_err(|e| e.to_string())??;
+        out.extend(faces);
+    }
     Ok(out)
 }
 
 /// Puts `tweaks` into the build at `build`, first undoing whatever Pious
 /// changed there before. With tweaks off, this only restores. `presets`
-/// are the mod-preset files from [`preset_mods`].
-pub fn apply(build: &Path, tweaks: &Tweaks, mods_dir: &Path, presets: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+/// are the mod-preset files from [`preset_mods`]; `plugins` are the client
+/// files enabled plugins bring (cursors, sounds…), which win over the
+/// presets but not over the user's own mods folder.
+pub fn apply(
+    build: &Path,
+    tweaks: &Tweaks,
+    mods_dir: &Path,
+    presets: Vec<(String, Vec<u8>)>,
+    plugins: Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
     restore(build)?;
     if !tweaks.enabled {
         crate::core::compat::apply(build, &[]);
+        crate::core::gpupref::apply(build, None);
         return Ok(());
     }
     crate::core::compat::apply(build, &crate::core::compat::layers(tweaks));
+    crate::core::gpupref::apply(build, tweaks.gpu.as_deref());
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -240,6 +397,9 @@ pub fn apply(build: &Path, tweaks: &Tweaks, mods_dir: &Path, presets: Vec<(Strin
         None => {}
     }
 
+    // Plugins' client files (a cursor pack, a death sound…).
+    files.extend(plugins.into_iter().filter(|(relative, _)| safe_relative(relative)));
+
     // The user's own mods go last, so they win over presets.
     if tweaks.use_mods_folder {
         for relative in walk(mods_dir) {
@@ -264,7 +424,11 @@ pub fn apply(build: &Path, tweaks: &Tweaks, mods_dir: &Path, presets: Vec<(Strin
             save_manifest(build, &manifest)?;
         }
         create_parent(&target)?;
+        unlock(&target);
         std::fs::write(&target, bytes).map_err(|e| format!("Couldn't write {relative} ({e}). Is that version running?"))?;
+        // Read-only, like Fishstrap does, so Roblox doesn't put its own
+        // file back over it.
+        lock(&target);
     }
     Ok(())
 }
@@ -302,10 +466,12 @@ pub fn restore(build: &Path) -> Result<(), String> {
             // A backup that was never finished means the original wasn't
             // touched yet.
             if backup.is_file() {
+                unlock(&target);
                 std::fs::copy(&backup, &target)
                     .map_err(|e| format!("Couldn't restore {relative} ({e}). Is that version running?"))?;
             }
         } else {
+            unlock(&target);
             let _ = std::fs::remove_file(&target);
         }
     }
@@ -362,6 +528,32 @@ fn walk(dir: &Path) -> Vec<String> {
     visit(dir, dir, &mut out);
     out.sort();
     out
+}
+
+/// Lets Pious change a file it made read-only.
+fn unlock(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut permissions = meta.permissions();
+        if permissions.readonly() {
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+fn lock(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut permissions = meta.permissions();
+        permissions.set_readonly(true);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
+/// A path that stays inside the build folder (no `..`, no drive or root).
+pub fn safe_relative(relative: &str) -> bool {
+    let path = Path::new(relative);
+    !relative.is_empty() && path.components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 fn create_parent(path: &Path) -> Result<(), String> {
@@ -437,14 +629,14 @@ mod tests {
             ..Tweaks::default()
         };
         // The font file itself sits in the mods folder too; that's fine.
-        apply(&build, &tweaks, &mods, Vec::new()).unwrap();
+        apply(&build, &tweaks, &mods, Vec::new(), Vec::new()).unwrap();
         assert_eq!(std::fs::read(build.join("content/fonts/arial.ttf")).unwrap(), b"custom");
         assert_eq!(std::fs::read(build.join("content/fonts/TwemojiMozilla.ttf")).unwrap(), b"emoji");
         assert_eq!(std::fs::read(build.join("content/sounds/ouch.ogg")).unwrap(), b"oof");
         assert!(build.join(FLAGS).is_file());
 
         // Applying again (or with other settings) starts from the originals.
-        apply(&build, &tweaks, &mods, vec![("content/textures/x.png".into(), b"preset".to_vec())]).unwrap();
+        apply(&build, &tweaks, &mods, vec![("content/textures/x.png".into(), b"preset".to_vec())], Vec::new()).unwrap();
         assert!(build.join("content/textures/x.png").is_file());
         restore(&build).unwrap();
         assert_eq!(std::fs::read(build.join("content/fonts/arial.ttf")).unwrap(), b"original");
@@ -457,6 +649,96 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_on_and_change_nothing() {
+        let tweaks = Tweaks::default();
+        assert!(tweaks.enabled, "tweaks are on by default");
+        assert!(tweaks.is_neutral());
+        assert!(fast_flags(&tweaks).unwrap().is_empty());
+        assert!(settings_values(&tweaks).is_empty());
+        assert!(preset_files(&tweaks).is_empty());
+        assert!(crate::core::compat::layers(&tweaks).is_empty());
+
+        // Applying the defaults to a build writes nothing at all.
+        let build = scratch("neutral");
+        let mods = scratch("neutral-mods");
+        std::fs::create_dir_all(build.join("content/fonts")).unwrap();
+        std::fs::write(build.join("content/fonts/arial.ttf"), b"original").unwrap();
+        apply(&build, &tweaks, &mods, Vec::new(), Vec::new()).unwrap();
+        assert!(!is_applied(&build));
+        assert!(!build.join(FLAGS).exists());
+        assert_eq!(std::fs::read(build.join("content/fonts/arial.ttf")).unwrap(), b"original");
+        let _ = std::fs::remove_dir_all(build);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    #[test]
+    fn reset_brings_every_tweak_back_but_keeps_profiles() {
+        let id = uuid::Uuid::new_v4();
+        let mut tweaks = Tweaks {
+            enabled: true,
+            fps_limit: Some(240),
+            msaa: 4,
+            gray_sky: true,
+            shiftlock: Some("cod".into()),
+            player_icon: Some("pious".into()),
+            window_title: "Hi".into(),
+            priority: Some("high".into()),
+            flag_profiles: vec![crate::core::model::FlagProfile { id, name: "Mine".into(), flags: [("FFlagX".to_owned(), "True".to_owned())].into() }],
+            active_profile: Some(id),
+            ..Tweaks::default()
+        };
+        assert!(!tweaks.is_neutral());
+        tweaks.reset();
+        assert!(tweaks.is_neutral());
+        assert!(tweaks.enabled);
+        assert_eq!(tweaks.flag_profiles.len(), 1, "saved profiles are kept");
+        assert!(tweaks.active_profile.is_none(), "but not used");
+        assert!(fast_flags(&tweaks).unwrap().is_empty());
+    }
+
+    #[test]
+    fn turning_tweaks_off_writes_nothing_and_restores() {
+        let build = scratch("off");
+        let mods = scratch("off-mods");
+        std::fs::create_dir_all(build.join("content/textures")).unwrap();
+        std::fs::write(build.join(crate::core::crosshair::TARGET), b"roblox's").unwrap();
+        let on = Tweaks { enabled: true, shiftlock: Some("dot".into()), msaa: 2, ..Tweaks::default() };
+        apply(&build, &on, &mods, Vec::new(), vec![("content/sounds/ouch.ogg".into(), b"plugin".to_vec())]).unwrap();
+        assert_ne!(std::fs::read(build.join(crate::core::crosshair::TARGET)).unwrap(), b"roblox's");
+        assert_eq!(std::fs::read(build.join("content/sounds/ouch.ogg")).unwrap(), b"plugin");
+
+        let off = Tweaks { enabled: false, ..on };
+        assert!(settings_values(&off).is_empty());
+        apply(&build, &off, &mods, Vec::new(), vec![("content/sounds/ouch.ogg".into(), b"plugin".to_vec())]).unwrap();
+        assert_eq!(std::fs::read(build.join(crate::core::crosshair::TARGET)).unwrap(), b"roblox's");
+        assert!(!build.join("content/sounds/ouch.ogg").exists());
+        assert!(!build.join(FLAGS).exists());
+        let _ = std::fs::remove_dir_all(build);
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    #[test]
+    fn plugin_files_cant_escape_the_build() {
+        assert!(safe_relative("content/sounds/ouch.ogg"));
+        assert!(!safe_relative("../../Windows/x.dll"));
+        assert!(!safe_relative("C:/Windows/x.dll"));
+        assert!(!safe_relative("/etc/x"));
+        assert!(!safe_relative(""));
+    }
+
+    #[test]
+    fn settings_record_round_trip() {
+        let dir = scratch("record");
+        let mut record = SettingsRecord::new();
+        record.insert("FramerateCap".into(), (crate::core::robloxsettings::Kind::Int, Some("60".into())));
+        save_record(&dir, &record).unwrap();
+        assert_eq!(load_record(&dir).get("FramerateCap").and_then(|(_, v)| v.clone()).as_deref(), Some("60"));
+        save_record(&dir, &SettingsRecord::new()).unwrap();
+        assert!(!settings_record(&dir).exists(), "an empty record leaves no file");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn restores_originals_from_a_damaged_record() {
         let build = scratch("damaged");
         let mods = scratch("damaged-mods");
@@ -466,7 +748,7 @@ mod tests {
         std::fs::create_dir_all(&mods).unwrap();
         std::fs::write(&font, b"custom").unwrap();
         let tweaks = Tweaks { enabled: true, font: Some(font), ..Tweaks::default() };
-        apply(&build, &tweaks, &mods, Vec::new()).unwrap();
+        apply(&build, &tweaks, &mods, Vec::new(), Vec::new()).unwrap();
         // A crash halfway through writing the record.
         std::fs::write(build.join(MANIFEST), b"{\"files\": {\"conte").unwrap();
         restore(&build).unwrap();

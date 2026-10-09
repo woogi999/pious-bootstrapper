@@ -9,8 +9,10 @@
     "splash",
     "chat",
     "inputs",
+    "stats",
     "emoji",
-    "notify"
+    "notify",
+    "plugin-host"
   ],
   "permissions": [
     "core:default",

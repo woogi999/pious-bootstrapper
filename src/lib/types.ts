@@ -89,6 +89,20 @@ export interface Appearance {
   glass: number;
   blur: Blur;
   blur_strength: number;
+  theme: string | null;
+  gradient: Gradient;
+  font: string;
+  radius: number;
+  font_scale: number;
+  accent_2: string;
+}
+
+export interface Gradient {
+  enabled: boolean;
+  from: string;
+  to: string;
+  angle: number;
+  opacity: number;
 }
 
 export interface Preferences {
@@ -118,6 +132,8 @@ export interface Preferences {
   ui_scale: number;
   search_blur: number;
   discord_display: "GameName" | "Pious";
+  /** Which Discord application the presence comes from. */
+  discord_app: "Roblox" | "Pious";
   appearance: Appearance;
   views: Record<string, ViewMode>;
   recorder: RecorderPrefs;
@@ -129,11 +145,8 @@ export interface Preferences {
   onboarded: boolean;
   seen_tips: string[];
   seen_version: string;
-  macros: Macro[];
-  macro_settings: MacroSettings;
-  autoclicker: Autoclicker;
   plugins: string[];
-  mcp: { enabled: boolean; port: number; allow_actions: boolean; allow_senses: boolean };
+  mcp: { enabled: boolean; port: number; allow_actions: boolean; allow_senses: boolean; start_on_demand: boolean };
   discord_join: boolean;
   pious_presence: boolean;
   discord_account: boolean;
@@ -146,6 +159,7 @@ export interface Preferences {
     in_game: boolean;
     sound: boolean;
     seconds: number;
+    style: "rich" | "compact";
   };
   appear_online: boolean;
   studio_presence: boolean;
@@ -157,8 +171,47 @@ export interface Preferences {
   dns_custom: string[];
   server_location: boolean;
   input_overlay: InputOverlay;
+  stats_overlay: StatsOverlay;
   keybinds: Keybinds;
   emoji_shortcodes: { in_app: boolean; in_roblox: boolean };
+  taskbar: { flash: boolean; badge: boolean; progress: boolean };
+  auto_update_roblox: boolean;
+  crash_reports: boolean;
+  region: string;
+  arrange_layout: string;
+}
+
+/** A number the stats overlay can show. */
+export type StatItem = "fps" | "ping" | "players" | "server_fps" | "location" | "session" | "cpu" | "memory" | "clock";
+
+export interface StatsOverlay {
+  enabled: boolean;
+  items: StatItem[];
+  layout: "row" | "column";
+  x: number;
+  y: number;
+  scale: number;
+  background: string;
+  text_color: string;
+  label_color: string;
+  font: string;
+  opacity: number;
+  labels: boolean;
+  only_in_game: boolean;
+  show_in_recordings: boolean;
+}
+
+/** One reading of the stats overlay (null: not known). */
+export interface StatsReading {
+  fps: number | null;
+  ping: number | null;
+  players: [number, number] | null;
+  server_fps: number | null;
+  location: string | null;
+  session_seconds: number | null;
+  cpu: number | null;
+  memory: number | null;
+  private: boolean;
 }
 
 export interface InputOverlay {
@@ -315,6 +368,39 @@ export interface Plugin {
   folder: string;
   problem: string | null;
   builtin: boolean;
+  provides: string | null;
+  main: string | null;
+  brings: string[];
+  themes: string[];
+  css: string | null;
+  icons: Record<string, string>;
+  sounds: Record<string, string>;
+}
+
+export interface Theme {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  folder: string;
+  plugin: string | null;
+  problem: string | null;
+  swatch: string[];
+}
+
+export interface UiAssets {
+  css: string[];
+  icons: Record<string, string>;
+  sounds: Record<string, string>;
+  font: [string, string] | null;
+}
+
+export interface CrashReport {
+  file: string;
+  kind: "pious" | "roblox";
+  at: string;
+  summary: string;
 }
 
 export interface StatsSummary {
@@ -508,8 +594,9 @@ export interface Tweaks {
   pause_voxelizer: boolean;
   gray_sky: boolean;
   still_grass: boolean;
+  no_grass: boolean;
   mesh_detail: number | null;
-  cursor: "Default" | "From2006" | "From2013";
+  cursor: "Default" | "From2006" | "From2013" | "BibataModernIce" | "Clean" | "Dot" | "Fps" | "Stoofs" | "VerySmallWhiteDot" | "WhiteDot" | "BlackAndWhiteDot" | "PurpleCross";
   old_character_sounds: boolean;
   old_avatar_background: boolean;
   emoji: EmojiStyle;
@@ -523,6 +610,15 @@ export interface Tweaks {
   disable_fullscreen_optimizations: boolean;
   dpi_override: string | null;
   priority: string | null;
+  /** Anti-aliasing off (×0); `msaa` 0 is "Roblox decides". */
+  msaa_off: boolean;
+  /** The old hidden 21-step quality; null leaves it to Roblox's slider. */
+  render_quality: number | null;
+  /** A sky preset, "custom" (skybox_folder) or null for Roblox's. */
+  skybox: string | null;
+  skybox_folder: string | null;
+  /** "default", "power_saving", "high_performance", "adapter:<n>" or null. */
+  gpu: string | null;
 }
 
 export type EmojiStyle =
@@ -666,10 +762,16 @@ export interface Snapshot {
   friends: Friends;
   font_presets: FontPreset[];
   roblox_uninstallable: boolean;
-  automation: AutomationStatus;
   browser_sessions: BrowserSession[];
   mcp: { url: string | null; error: string | null };
   plugins: Plugin[];
+  themes: Theme[];
+  themes_dir: string;
+  plugins_dir: string;
+  install_dir: string | null;
+  crashes: CrashReport[];
+  plugin_status: { plugin: string; name: string; text: string; active: boolean }[];
+  roblox_updating: boolean;
   installed: boolean;
   news: { items: NewsItem[]; loading: boolean; errors: string[] };
 }
@@ -729,6 +831,7 @@ export interface LaunchPlan {
   pin_account?: boolean;
   force?: boolean;
   link?: string | null;
+  region?: string | null;
 }
 
 export type Tone = "positive" | "active" | "caution" | "negative" | "neutral";

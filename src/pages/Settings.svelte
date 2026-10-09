@@ -14,6 +14,7 @@
   import { fromHsl, parseHex, toHex, toHsl } from "../lib/theme";
   import type { Appearance, Blur, RecorderPrefs, Uuid } from "../lib/types";
   import InputOverlaySettings from "../components/InputOverlaySettings.svelte";
+  import StatsOverlaySettings from "../components/StatsOverlaySettings.svelte";
   import HotkeyInput from "../components/HotkeyInput.svelte";
   import Icon from "../components/Icon.svelte";
   import Select from "../components/Select.svelte";
@@ -37,6 +38,11 @@
     ["about", "About"],
   ];
 
+  // Macros, from the Macros plugin (for the logo choices).
+  let macroList = $state<{ id: string; name: string }[]>([]);
+  $effect(() => {
+    if (app.settingsTab === "general" && macrosOn()) call<{ id: string; name: string }[]>("plugin_request", { feature: "macros", method: "list", args: {} }).then((l) => (macroList = l ?? [])).catch(() => {});
+  });
   // ── General ────────────────────────────────────────────────────────────
   const logoChoices = $derived([
     { value: "home", label: "Go home" },
@@ -47,7 +53,8 @@
     { value: "streamer", label: "Toggle streamer mode" },
     { value: "none", label: "Just spin" },
     ...NAV.filter((p) => p !== "home").map((p) => ({ value: `page:${p}`, label: `Open ${PAGE_TITLES[p]}` })),
-    ...(macrosOn() ? [{ value: "page:macros", label: "Open Macros" }, ...prefs.macros.map((m) => ({ value: `macro:${m.id}`, label: `Run macro: ${m.name}` }))] : []),
+    // Macros come from the Macros plugin, when it's on.
+    ...(macrosOn() ? [{ value: "page:macros", label: "Open Macros" }, ...macroList.map((m) => ({ value: `macro:${m.id}`, label: `Run macro: ${m.name}` }))] : []),
   ]);
   const streamerApps = $derived(prefs.streamer_apps.join(", "));
 
@@ -72,6 +79,10 @@
     navigate: "open Pious pages",
     macros: "run your macros",
     links: "open web links",
+    input: "press keys, click and read the screen in Roblox and other windows",
+    hotkeys: "use keyboard shortcuts",
+    run: "open programs, files and links",
+    full: "do anything Pious can, including changing every setting",
   };
   function togglePlugin(id: string, on: boolean) {
     const set = new Set(prefs.plugins);
@@ -121,9 +132,10 @@
   const hours = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m`);
 
   // ── Colors ─────────────────────────────────────────────────────────────
-  type Target = "accent" | "background" | "surface" | "text";
+  type Target = "accent" | "accent_2" | "background" | "surface" | "text";
   const targets: [Target, string][] = [
     ["accent", "Accent"],
+    ["accent_2", "Second accent"],
     ["background", "Background"],
     ["surface", "Glass"],
     ["text", "Text"],
@@ -208,7 +220,48 @@
     glass: 1,
     blur: "Frosted",
     blur_strength: 0.5,
+    theme: null,
+    gradient: { enabled: false, from: "#2B1F4A", to: "#0A0A0B", angle: 135, opacity: 0.6 },
+    font: "",
+    radius: 1,
+    font_scale: 1,
+    accent_2: "",
   };
+
+  // ── Themes and fonts ───────────────────────────────────────────────────
+  let systemFonts = $state<string[]>([]);
+  $effect(() => {
+    if (app.settingsTab === "appearance" && !systemFonts.length) call<string[]>("system_fonts").then((f) => (systemFonts = f)).catch(() => {});
+  });
+  const fontChoices = $derived([
+    { value: "", label: "Manrope (Pious's own)" },
+    ...systemFonts.map((f) => ({ value: f, label: f })),
+    ...(look.font && !systemFonts.includes(look.font) ? [{ value: look.font, label: look.font }] : []),
+  ]);
+  const gradient = (patch: Partial<Appearance["gradient"]>) => appearance({ gradient: { ...look.gradient, ...patch } });
+
+  // ── Regions and arranging ──────────────────────────────────────────────
+  let regions = $state<[string, string][]>([]);
+  $effect(() => {
+    if (app.settingsTab === "general" && !regions.length) call<[string, string][]>("regions").then((r) => (regions = r)).catch(() => {});
+  });
+  const regionChoices = $derived([
+    { value: "auto", label: "Automatic (Roblox picks)" },
+    { value: "best_ping", label: "Best ping" },
+    ...regions.map(([value, label]) => ({ value, label })),
+  ]);
+
+  // ── Crash reports ──────────────────────────────────────────────────────
+  let crashText = $state<{ file: string; text: string } | null>(null);
+  async function openCrash(file: string) {
+    const text = await run<string>("read_crash", { file });
+    if (text != null) crashText = { file, text };
+  }
+  function reportCrash(text: string) {
+    const title = encodeURIComponent("Crash: " + (text.split(/\r?\n/).find((l) => l.startsWith("What:") || l.startsWith("Roblox crashed")) ?? "Pious crashed").slice(0, 120));
+    const body = encodeURIComponent("What were you doing when it crashed?\n\n\n<details><summary>Crash report</summary>\n\n```\n" + text.slice(0, 5000) + "\n```\n</details>");
+    run("open_external", { url: `https://github.com/woogi999/pious-bootstrapper/issues/new?title=${title}&body=${body}` });
+  }
   const isDefault = $derived(JSON.stringify(look) === JSON.stringify(defaults));
 
   // ── Default account ────────────────────────────────────────────────────
@@ -347,6 +400,34 @@
             {@render setting("Roblox settings", "Volume, sensitivity, graphics and more for this PC. Accounts can keep their own (Accounts → … → Roblox settings).")}
             <button class="btn" onclick={() => (app.modal = { kind: "roblox_settings", account: null })}><Icon name="edit" />Edit</button>
           </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting(
+              "Keep Roblox up to date",
+              snap.roblox_updating ? "Updating Roblox in the background…" : "Install new Roblox versions in the background as they come out, so games start straight away.",
+            )}
+            <Switch on={prefs.auto_update_roblox} onchange={(on) => setPreferences({ auto_update_roblox: on })} />
+          </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Server region", "Where public servers are joined when you don't pick one. Joining friends, links and private servers isn't affected.")}
+            <Select options={regionChoices} value={prefs.region} onchange={(region) => setPreferences({ region })} width="240px" />
+          </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Auto arrange", "How Instances → Arrange lays out Roblox windows across your screens.")}
+            <Select
+              options={[
+                { value: "grid", label: "Grid" },
+                { value: "columns", label: "Side by side" },
+                { value: "rows", label: "Stacked" },
+                { value: "cascade", label: "Cascade" },
+              ]}
+              value={prefs.arrange_layout}
+              onchange={(arrange_layout) => setPreferences({ arrange_layout })}
+              width="180px"
+            />
+          </div>
         </section>
         <section class="glass list">
           <div class="item">
@@ -406,7 +487,7 @@
         <section class="glass list">
           <div class="item">
             {@render setting("Pop-ups from Roblox", "Pious's own notifications in the corner of your screen, for the account you play as. Click one to open it.")}
-            <button class="btn small" disabled={!prefs.notifications.enabled} onclick={() => invoke("notify_test")}>Try one</button>
+            <button class="btn small" disabled={!prefs.notifications.enabled} onclick={() => run("notify_test", { kind: null })}>Try one</button>
             <Switch on={prefs.notifications.enabled} onchange={(enabled) => setPreferences({ notifications: { enabled } })} />
           </div>
           {#each [["messages", "Messages", "A friend messaged you."], ["friend_requests", "Friend requests", "Someone wants to be friends."], ["friend_joins", "Friends playing", "A friend started a game. You can join them from the pop-up."], ["roblox", "Roblox notifications", "New ones in Roblox's bell."], ["in_game", "Over games", "Also while a Roblox window is in front."], ["sound", "Sound", "A short chime with each one."]] as const as [key, title, description] (key)}
@@ -426,15 +507,72 @@
               width="150px"
             />
           </div>
+          <hr class="divider" />
+          <div class="item" class:off={!prefs.notifications.enabled}>
+            {@render setting("Look", "Rich: a game's banner when a friend starts playing, a chat bubble for messages. Compact: one small card for everything.")}
+            <Select
+              options={[
+                { value: "rich" as const, label: "Rich" },
+                { value: "compact" as const, label: "Compact" },
+              ]}
+              value={prefs.notifications.style}
+              onchange={(style) => setPreferences({ notifications: { style } })}
+              width="150px"
+            />
+          </div>
+        </section>
+        <span class="label">Taskbar</span>
+        <section class="glass list">
+          {#each [["flash", "Flash for attention", "Flash Pious's taskbar button when something arrives while you're elsewhere."], ["badge", "Badge", "A count of pop-ups you haven't seen on the taskbar button, cleared when you open Pious."], ["progress", "Download progress", "Show Roblox downloads on the taskbar button."]] as const as [key, title, description], i (key)}
+            {#if i}<hr class="divider" />{/if}
+            <div class="item">
+              {@render setting(title, description)}
+              <Switch on={prefs.taskbar[key]} onchange={(on) => setPreferences({ taskbar: { [key]: on } })} />
+            </div>
+          {/each}
+          <span class="meta" style="padding: 0 0 10px">Windows doesn't show badges with small taskbar buttons, and some taskbar replacements show none of these.</span>
         </section>
       {:else if app.settingsTab === "appearance"}
+        <span class="label">Themes</span>
+        <section class="glass list">
+          <div class="item">
+            {@render setting(
+              "Themes",
+              look.theme ? `Using ${snap.themes.find((t) => t.id === look.theme)?.name ?? look.theme}. Fine-tune it below.` : "A theme sets the whole look at once. Add more by dropping a theme folder in the themes folder.",
+            )}
+            <button class="btn" onclick={() => run("open_themes_folder")}><Icon name="folder" />Themes folder</button>
+            <button class="btn tertiary" onclick={() => app.navigate({ name: "help", doc: "THEMES" })}><Icon name="book-open" />Make one</button>
+          </div>
+          <div class="themes">
+            {#each snap.themes as t (t.id)}
+              <button
+                class="theme-card glass-base"
+                class:on={look.theme === t.id}
+                class:broken={!!t.problem}
+                title={t.problem ?? t.description}
+                onclick={() => (t.problem ? app.toast("caution", `${t.name} can't be used: ${t.problem}`) : run("apply_theme", { id: t.id }))}
+              >
+                <span class="theme-swatch" style="background: linear-gradient(135deg, {t.swatch[4] ?? t.swatch[1]}, {t.swatch[5] ?? t.swatch[1]})">
+                  <span style="background: {t.swatch[0]}"></span><span style="background: {t.swatch[3]}"></span>
+                </span>
+                <span class="col" style="gap: 0; min-width: 0">
+                  <span class="line" style="font-weight: 600">{t.name}</span>
+                  <span class="line meta">{t.problem ? "Can't be used" : t.plugin ? `From a plugin` : t.author || "Theme"}</span>
+                </span>
+              </button>
+            {:else}
+              <span class="meta">No themes yet. Put a theme's folder in the themes folder.</span>
+            {/each}
+          </div>
+        </section>
+        <span class="label">Look</span>
         <section class="glass list">
           <div class="colors">
             {@render setting("Colors", "Pick any color for the accent, background, glass and text. Changes apply instantly.")}
             <div class="row" style="gap: 6px">
               {#each targets as [key, name] (key)}
                 <button class="chip" class:on={target === key} onclick={() => (target = key)}>
-                  <span class="swatch" style="background: {look[key]}"></span>{name}
+                  <span class="swatch" style="background: {look[key] || look.accent}"></span>{name}
                 </button>
               {/each}
             </div>
@@ -476,6 +614,43 @@
                 </label>
               </div>
             </div>
+          </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Gradient", "A gradient across the background, in two colors of your choice.")}
+            {#if look.gradient.enabled}
+              <label class="row color-pick" title="From"><input type="color" value={look.gradient.from} oninput={(e) => gradient({ from: e.currentTarget.value.toUpperCase() })} /></label>
+              <label class="row color-pick" title="To"><input type="color" value={look.gradient.to} oninput={(e) => gradient({ to: e.currentTarget.value.toUpperCase() })} /></label>
+            {/if}
+            <Switch on={look.gradient.enabled} onchange={(enabled) => gradient({ enabled })} />
+          </div>
+          {#if look.gradient.enabled}
+            <div class="item">
+              {@render setting("Gradient angle", "Which way it runs.")}
+              <Slider value={look.gradient.angle} min={0} max={360} step={5} onchange={(angle) => gradient({ angle })} />
+            </div>
+            <div class="item">
+              {@render setting("Gradient strength", "How strongly it shows over the background.")}
+              <Slider value={look.gradient.opacity} min={0} max={1} onchange={(opacity) => gradient({ opacity })} />
+            </div>
+          {/if}
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Font", "Pious's own, or any font installed on your PC.")}
+            <Select options={fontChoices} value={look.font} onchange={(font) => setPreferences({ appearance: { font } })} width="260px" />
+          </div>
+          <div class="font-sample" style="font-family: {look.font ? `'${look.font.replace(/'/g, '')}', ` : ''}Manrope, sans-serif">
+            The quick brown fox jumps over the lazy dog. 0123456789
+          </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Roundness", "How round corners are. All the way down is square.")}
+            <Slider value={look.radius} min={0} max={2} onchange={(radius) => appearance({ radius })} />
+          </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Text size", "Larger or smaller text, without changing the rest (Interface size changes everything).")}
+            <Slider value={look.font_scale} min={0.85} max={1.25} step={0.05} onchange={(font_scale) => appearance({ font_scale })} />
           </div>
           <hr class="divider" />
           <div class="item">
@@ -610,6 +785,8 @@
             <Switch on={prefs.overlay.media} onchange={(on) => setPreferences({ overlay: { media: on } })} />
           </div>
         </section>
+        <span class="label">Game stats on screen</span>
+        <StatsOverlaySettings />
         <span class="label">Keys, mouse and FPS on screen</span>
         <InputOverlaySettings />
       {:else if app.settingsTab === "recording"}
@@ -955,30 +1132,7 @@
             <HotkeyInput value={rec.manual_clip_hotkey} onchange={(manual_clip_hotkey) => setPreferences({ recorder: { manual_clip_hotkey } })} />
           </div>
         </section>
-        {#if macrosOn()}
-        <span class="label">Macros</span>
-        <section class="glass list">
-          <div class="item">
-            {@render setting("Record a macro", "Starts and stops recording your keys and clicks.")}
-            <HotkeyInput value={prefs.macro_settings.record_hotkey} onchange={(record_hotkey) => setPreferences({ macro_settings: { record_hotkey } })} />
-          </div>
-          <hr class="divider" />
-          <div class="item">
-            {@render setting("Stop macros", "Stops every macro and the auto-clicker.")}
-            <HotkeyInput value={prefs.macro_settings.stop_hotkey} onchange={(stop_hotkey) => setPreferences({ macro_settings: { stop_hotkey } })} />
-          </div>
-          <hr class="divider" />
-          <div class="item">
-            {@render setting("Auto-clicker", prefs.autoclicker.enabled ? "Starts and stops clicking." : "Turn on the auto-clicker in Macros to use it.")}
-            <HotkeyInput value={prefs.autoclicker.hotkey} onchange={(hotkey) => setPreferences({ autoclicker: { hotkey } })} />
-          </div>
-          <hr class="divider" />
-          <div class="item">
-            {@render setting("Each macro", "Give a macro its own hotkey in Macros.")}
-            <button class="btn" onclick={() => app.navigate({ name: "macros" })}><Icon name="macros" />Macros</button>
-          </div>
-        </section>
-        {/if}
+        <span class="secondary">Macros, the auto-clicker and their hotkeys are in the Macros plugin's page (Settings → Plugins).</span>
         <div class="row">
           <span class="label grow">In Pious</span>
           {#if Object.keys(prefs.shortcuts).length}
@@ -1011,12 +1165,17 @@
           <button class="btn small" onclick={() => run("create_example_plugin")}><Icon name="add" />Example plugin</button>
           <button class="btn small" onclick={() => run("open_plugins_folder")}><Icon name="folder" />Plugins folder</button>
         </div>
+        <div class="notice caution">
+          <Icon name="shield" />Only add plugins you trust and have looked over. A plugin with broad permissions (input, run, full) can type, click,
+          open programs and change Pious for you. Pious doesn't check third-party plugins and isn't responsible for what they do, including
+          lost accounts or data.
+        </div>
         {#if !snap.plugins.length}
           <div class="glass-base empty-plugins">
             <span class="tile-icon" style="width: 44px; height: 44px; border-radius: 50%"><Icon name="plugins" size={20} /></span>
             <div class="col" style="gap: 3px">
               <span class="item-title">No plugins yet</span>
-              <span class="meta">A plugin is a folder with a plugin.json and a page. Make the example to see how one works, then change it however you like.</span>
+              <span class="meta">A plugin is a folder with a plugin.json: a page, Roblox files (cursors, death sounds…), themes, icons or styles. Make the example to see how one works, then change it however you like.</span>
             </div>
           </div>
         {:else}
@@ -1026,23 +1185,26 @@
               <div class="item plugin">
                 <span class="tile-icon" style="width: 36px; height: 36px"><Icon name={p.icon} size={17} /></span>
                 <div class="col grow" style="gap: 2px">
-                  <span class="item-title">{p.name} <span class="secondary">{p.builtin ? "Comes with Pious" : `${p.version}${p.author ? ` · ${p.author}` : ""}`}</span></span>
+                  <span class="item-title">{p.name} <span class="secondary">{p.author === "Pious" ? "Comes with Pious" : `${p.version}${p.author ? ` · ${p.author}` : ""}`}</span></span>
                   <span class="meta">{p.problem ?? (p.description || "No description.")}</span>
+                  {#if p.brings.length && !p.problem}
+                    <span class="row" style="gap: 4px; flex-wrap: wrap">{#each p.brings as b (b)}<span class="chip small">{b}</span>{/each}</span>
+                  {/if}
                   {#if p.permissions.length}
                     <span class="secondary">Can {p.permissions.map((x) => PERMISSION_TEXT[x] ?? x).join(", ")}</span>
                   {/if}
                 </div>
-                {#if p.builtin}
-                  {#if p.enabled && p.id === "pious.macros"}<button class="btn small" onclick={() => app.navigate({ name: "macros" })}>Open</button>{/if}
-                {:else}
-                  <button class="icon-btn" title="Open its folder" aria-label="Open folder" onclick={() => run("open_path", { path: p.folder })}><Icon name="folder" /></button>
-                {/if}
+                {#if p.enabled && p.provides === "macros"}<button class="btn small" onclick={() => app.navigate({ name: "macros" })}>Open</button>{/if}
+                <button class="icon-btn" title="Open its folder" aria-label="Open folder" onclick={() => run("open_path", { path: p.folder })}><Icon name="folder" /></button>
                 <Switch on={p.enabled} disabled={!!p.problem} onchange={(on) => togglePlugin(p.id, on)} />
               </div>
             {/each}
           </section>
         {/if}
-        <span class="secondary">Plugins run walled off from Pious and can only do what they list. Only turn on plugins you trust.</span>
+        <span class="secondary">
+          Plugin pages run walled off from Pious and can only do what they list. Only turn on plugins you trust.
+          <button class="link" onclick={() => app.navigate({ name: "help", doc: "PLUGINS" })}>How plugins work</button>
+        </span>
 
         <span class="label">AI apps (MCP)</span>
         <section class="glass list">
@@ -1079,6 +1241,13 @@
             <div class="item">
               {@render setting("See and hear games", "AI apps can take pictures of Roblox windows and record a few seconds of a game's sound, if the AI can take them in.")}
               <Switch on={prefs.mcp.allow_senses ?? true} disabled={!prefs.mcp.enabled} onchange={(allow_senses) => setPreferences({ mcp: { allow_senses } })} />
+            </div>
+            <div class="item">
+              {@render setting(
+                "Start Pious when an AI app needs it",
+                "Off: AI apps never start Pious; they say it isn't running until you open it. On: an AI app asking Pious to do something starts it in the tray. (Opening an AI app alone never starts Pious.)",
+              )}
+              <Switch on={prefs.mcp.start_on_demand ?? false} disabled={!prefs.mcp.enabled} onchange={(start_on_demand) => setPreferences({ mcp: { start_on_demand } })} />
             </div>
             <div class="item">
               {@render setting("Port", "Only this PC can connect.")}
@@ -1162,6 +1331,48 @@
             {@render setting("Managed versions", snap.versions_dir)}
             <button class="btn" onclick={() => run("open_path", { path: snap.versions_dir })}><Icon name="external" />Open</button>
           </div>
+          <hr class="divider" />
+          <div class="item">
+            {@render setting("Help", "Everything about Pious, its privacy policy and terms.")}
+            <button class="btn" onclick={() => app.navigate({ name: "help" })}><Icon name="book-open" />Help</button>
+            <button class="btn tertiary" onclick={() => app.navigate({ name: "help", doc: "PRIVACY" })}>Privacy</button>
+            <button class="btn tertiary" onclick={() => app.navigate({ name: "help", doc: "TERMS" })}>Terms</button>
+          </div>
+        </section>
+        <span class="label">Crash reports</span>
+        <section class="glass list">
+          <div class="item">
+            {@render setting(
+              "Keep crash reports",
+              "When Pious or a Roblox window it started crashes, write what happened to a file on this PC (your user name and Roblox sign-ins are left out). Nothing is sent anywhere.",
+            )}
+            <button class="btn" onclick={() => run("open_crashes_folder")}><Icon name="folder" />Folder</button>
+            <Switch on={prefs.crash_reports} onchange={(crash_reports) => setPreferences({ crash_reports })} />
+          </div>
+          {#each snap.crashes.slice(0, 8) as c (c.file)}
+            <hr class="divider" />
+            <div class="item">
+              <span class="tile-icon" style="width: 32px; height: 32px"><Icon name={c.kind === "roblox" ? "game" : "warning"} size={15} /></span>
+              <div class="col grow" style="gap: 1px; min-width: 0">
+                <span class="item-title">{c.kind === "roblox" ? "Roblox" : "Pious"} · {new Date(c.at).toLocaleString()}</span>
+                <span class="meta line" title={c.summary}>{c.summary || "No details"}</span>
+              </div>
+              <button class="btn small" onclick={() => openCrash(c.file)}>Open</button>
+            </div>
+            {#if crashText?.file === c.file}
+              <pre class="crash selectable">{crashText.text}</pre>
+              <div class="item" style="justify-content: flex-end">
+                <button class="btn small tertiary" onclick={() => (crashText = null)}>Close</button>
+                <button class="btn small" onclick={() => reportCrash(crashText!.text)}><Icon name="external" />Report on GitHub</button>
+              </div>
+            {/if}
+          {/each}
+          {#if snap.crashes.length}
+            <hr class="divider" />
+            <div class="item" style="justify-content: flex-end">
+              <button class="btn small tertiary" onclick={() => run("clear_crashes")}><Icon name="remove" />Delete all</button>
+            </div>
+          {/if}
         </section>
         {#if stats}
           <span class="label">Your stats</span>
@@ -1207,6 +1418,77 @@
 </div>
 
 <style>
+  .themes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 8px;
+    padding: 4px 0 12px;
+  }
+  .theme-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--r-md);
+    border: 1px solid rgb(var(--surface) / 0.08);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .theme-card.on {
+    border-color: rgb(var(--accent) / 0.8);
+    box-shadow: 0 0 0 1px rgb(var(--accent) / 0.5);
+  }
+  .theme-card.broken {
+    opacity: 0.55;
+  }
+  .theme-swatch {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    flex: none;
+    border-radius: var(--r-sm);
+    border: 1px solid rgb(255 255 255 / 0.1);
+  }
+  .theme-swatch span {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    bottom: 5px;
+  }
+  .theme-swatch span:first-child {
+    left: 5px;
+  }
+  .theme-swatch span:last-child {
+    left: 19px;
+  }
+  .font-sample {
+    padding: 0 0 12px;
+    font-size: 15px;
+    color: rgb(var(--muted));
+  }
+  .color-pick input {
+    width: 30px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+  }
+  .crash {
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    max-height: 260px;
+    overflow: auto;
+    border-radius: var(--r-md);
+    background: rgb(0 0 0 / 0.28);
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   .settings {
     max-width: 880px;
     margin: 0 auto;

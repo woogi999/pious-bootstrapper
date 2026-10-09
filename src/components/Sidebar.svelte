@@ -1,7 +1,7 @@
 <!-- Navigation, the search shortcut and the play-as account switcher. The
      switcher picks the account Play uses; it never changes the default. -->
 <script lang="ts">
-  import { app, macrosOn, type Page } from "../lib/state.svelte";
+  import { app, type Page } from "../lib/state.svelte";
   import { run } from "../lib/api";
   import { keysFor, runAction } from "../lib/shortcuts";
   import { keyLabel } from "../lib/keys";
@@ -20,7 +20,6 @@
   const selected = (name: Page["name"], id?: string) =>
     (app.page.name === name && (!id || (app.page.name === "plugin" && app.page.id === id))) || (name === "games" && app.page.name === "game");
   const plugins = $derived((snap?.plugins ?? []).filter((p) => p.enabled && p.page));
-  const automating = $derived(!!snap && (snap.automation.running.length > 0 || snap.automation.clicking || snap.automation.recording));
 
   // The logo spins when clicked, then does what Settings says.
   let spins = $state(0);
@@ -121,7 +120,6 @@
     {@render item("versions", "versions", "Versions", installing ? "↓" : null)}
     {@render item("tweaks", "sliders", "Tweaks")}
     {@render item("keybinds", "keyboard", "Keybinds")}
-    {#if macrosOn()}{@render item("macros", "macros", "Macros", automating ? "●" : null)}{/if}
     {@render item("running", "running", "Instances", running ? String(running) : null)}
     {#if plugins.length}
       <span class="label group text">Plugins</span>
@@ -149,6 +147,7 @@
     </button>
   {/if}
   <hr class="divider" />
+  {@render item("help", "book-open", "Help")}
   {@render item("settings", "settings", "Settings")}
 </aside>
 

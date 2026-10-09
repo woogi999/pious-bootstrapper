@@ -1,0 +1,12 @@
+{
+  "id": "pious.macros",
+  "name": "Macros",
+  "version": "1.0.0",
+  "author": "Pious",
+  "description": "Record or build macros and run them with a hotkey, plus an auto-clicker. Both can send their keys and clicks to Roblox in the background, so you can keep using your PC. Delete this folder to remove Macros from Pious.",
+  "icon": "macros",
+  "provides": "macros",
+  "page": "index.html",
+  "main": "engine.js",
+  "permissions": ["read", "input", "hotkeys", "notify", "navigate", "run"]
+}

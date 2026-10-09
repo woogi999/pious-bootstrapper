@@ -7,3 +7,9 @@
 /installer/vendor
 /installer/gen
 /installer/target
+
+# Written by Pious into plugin folders (the API file, engine pages) and plugins' own saved data
+/plugins/*/pious-plugin.js
+/plugins/*/pious-ui.css
+/plugins/*/pious-engine.html
+/plugins/*/data/

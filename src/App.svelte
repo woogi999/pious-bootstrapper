@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { convertFileSrc } from "@tauri-apps/api/core";
+  import { convertFileSrc, invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { listen } from "@tauri-apps/api/event";
-  import { app, connect } from "./lib/state.svelte";
+  import { app, connect, type Page } from "./lib/state.svelte";
   import { handleLaunch, run, setPreferences } from "./lib/api";
   import type { LaunchOutcome } from "./lib/types";
   import { handleShortcut } from "./lib/shortcuts";
-  import { applyAppearance } from "./lib/theme";
+  import { applyAppearance, followUiAssets } from "./lib/theme";
   import ContextMenu from "./components/ContextMenu.svelte";
   import Icon from "./components/Icon.svelte";
   import ModalHost from "./components/ModalHost.svelte";
@@ -21,7 +21,6 @@
   import GameDetail from "./pages/GameDetail.svelte";
   import Games from "./pages/Games.svelte";
   import Home from "./pages/Home.svelte";
-  import Macros from "./pages/Macros.svelte";
   import News from "./pages/News.svelte";
   import PluginPage from "./pages/PluginPage.svelte";
   import Running from "./pages/Running.svelte";
@@ -30,6 +29,7 @@
   import Settings from "./pages/Settings.svelte";
   import Versions from "./pages/Versions.svelte";
   import TweaksPage from "./pages/Tweaks.svelte";
+  import Help from "./pages/Help.svelte";
 
   const snap = $derived(app.snap);
   const look = $derived(snap?.bootstrapper.preferences.appearance);
@@ -75,6 +75,8 @@
 
   onMount(() => {
     connect();
+    // Plugins' and the theme's styles and icons.
+    const assets = followUiAssets();
     const frames = listen<string>("backdrop-frame", (event) => (backdrop = event.payload));
     const appear = () => {
       if (shown) return;
@@ -95,6 +97,14 @@
       handleLaunch(await once(false), () => once(true));
     };
     const joins = listen("notify-join", takeJoin);
+    // A plugin's engine asked to open a page.
+    const navigations = listen<string>("plugin-navigate", (e) => app.navigate({ name: e.payload } as Page));
+    // Opened with --page <name> (`plugin:<id>` for a plugin's page).
+    invoke<string | null>("startup_page").then((page) => {
+      if (!page) return;
+      if (page.startsWith("plugin:")) app.navigate({ name: "plugin", id: page.slice(7) });
+      else app.navigate({ name: page } as Page);
+    }).catch(() => {});
     takeJoin();
     const focused = getCurrentWindow().onFocusChanged(({ payload }) => payload && appear());
     // Opened without the logo (e.g. shown from the tray later).
@@ -113,7 +123,9 @@
       frames.then((f) => f());
       showing.then((f) => f());
       joins.then((f) => f());
+      navigations.then((f) => f());
       focused.then((f) => f());
+      assets();
     };
   });
 </script>
@@ -128,6 +140,7 @@
     <img class="picture" src={background} alt="" />
   {/if}
   <div class="backdrop" class:with-picture={!!background}></div>
+  {#if look?.gradient.enabled}<div class="gradient"></div>{/if}
   <Titlebar />
   <div class="shell">
     <Sidebar />
@@ -148,11 +161,12 @@
         {#if snap?.bootstrapper.preferences.streamer_mode}
           <button class="chip" title="Names are hidden. Click to show them." onclick={() => setPreferences({ streamer_mode: false })}><Icon name="streamer" />Streamer mode</button>
         {/if}
-        {#if snap && (snap.automation.running.length || snap.automation.clicking || snap.automation.recording)}
-          <button class="chip rec" onclick={() => app.navigate({ name: "macros" })}>
-            <span class="rec-dot"></span>{snap.automation.recording ? "Recording a macro" : snap.automation.clicking ? "Auto-clicking" : "Macro running"}
+        <!-- What plugins are doing (a macro running, the auto-clicker…). -->
+        {#each snap?.plugin_status ?? [] as st (st.plugin)}
+          <button class="chip" class:rec={st.active} title={st.name} onclick={() => app.navigate({ name: "plugin", id: st.plugin })}>
+            {#if st.active}<span class="rec-dot"></span>{/if}{st.text}
           </button>
-        {/if}
+        {/each}
         {#if snap?.recorder.recording_since != null}
           <button class="chip rec" onclick={() => app.navigate({ name: "settings" })}><span class="rec-dot"></span>Recording</button>
         {/if}
@@ -185,8 +199,9 @@
                 {:else if app.page.name === "tweaks"}<TweaksPage />
                 {:else if app.page.name === "running"}<Running />
                 {:else if app.page.name === "keybinds"}<Keybinds />
-                {:else if app.page.name === "macros"}<Macros />
+                {:else if app.page.name === "macros"}<PluginPage id="pious.macros" />
                 {:else if app.page.name === "plugin"}<PluginPage id={app.page.id} />
+                {:else if app.page.name === "help"}<Help doc={app.page.doc} />
                 {:else}<Settings />{/if}
               </div>
             {/key}
@@ -246,6 +261,13 @@
     position: absolute;
     inset: 0;
     background: rgb(var(--bg) / var(--window-alpha));
+  }
+  .gradient {
+    position: absolute;
+    inset: 0;
+    background: var(--gradient);
+    opacity: var(--gradient-opacity);
+    pointer-events: none;
   }
   .backdrop.with-picture {
     background: rgb(var(--bg) / calc(var(--image-dim) * var(--window-alpha)));

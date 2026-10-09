@@ -1,0 +1,161 @@
+/* Pious's components as plain CSS classes, for plugin pages (see
+   docs/PLUGIN-UI.md). Pious writes this, after app.css, into every plugin
+   folder as pious-ui.css; a page links it and looks like Pious:
+
+     <link rel="stylesheet" href="pious-ui.css" />
+
+   Each block mirrors a component in src/components; when one changes,
+   change it here too. Colors and sizes are app.css's variables, which
+   Pious keeps in step with the user's theme. */
+
+/* Plugin pages scroll on their own (Pious's window doesn't scroll them). */
+html, body { height: auto; min-height: 100%; overflow: auto; }
+body { margin: 0; padding: 4px 16px 32px; }
+.page { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Groups and setting rows (SettingRow) ─────────────────────────────── */
+
+.group { display: flex; flex-direction: column; gap: 6px; }
+.list { padding: 2px 16px; }
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  transition: opacity var(--med);
+}
+.setting-row > .text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.setting-row > .text > .title { font-weight: 500; font-size: 13.5px; }
+.setting-row > .text > .description { font-size: 12px; color: rgb(var(--muted)); }
+.setting-row.off { opacity: 0.4; }
+
+/* ── Switch ───────────────────────────────────────────────────────────── */
+/* <button class="switch on" role="switch" aria-checked="true"><span></span></button> */
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border-radius: 99px;
+  border: 1px solid rgb(var(--surface) / 0.12);
+  background: rgb(var(--surface) / 0.08);
+  cursor: pointer;
+  transition: background var(--med) var(--ease), border-color var(--med);
+}
+.switch.on { background: rgb(var(--accent)); border-color: transparent; }
+.switch:disabled { opacity: 0.4; pointer-events: none; }
+.switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgb(var(--text));
+  transition: transform var(--med) var(--ease), background var(--med);
+}
+.switch.on > span { transform: translateX(16px); background: rgb(var(--accent-ink)); }
+
+/* ── Drop-downs (Select) ──────────────────────────────────────────────── */
+/* A native <select class="input select">, dressed like Pious's. */
+
+select.input, .select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%23a0a0a2'%3E%3Cpath d='M5.2 7.2a.75.75 0 0 1 1.06 0L10 10.94l3.74-3.74a.75.75 0 1 1 1.06 1.06l-4.27 4.27a.75.75 0 0 1-1.06 0L5.2 8.26a.75.75 0 0 1 0-1.06Z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 14px;
+}
+select.input option, .select option { background: rgb(var(--panel)); color: rgb(var(--text)); }
+
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
+/* <div class="tabs"><button class="tab on">One</button>…</div> */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: rgb(var(--surface) / calc(0.035 * var(--glass)));
+  border: 1px solid rgb(var(--surface) / calc(0.06 * var(--glass)));
+  overflow-x: auto;
+}
+.tab {
+  flex: 1;
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: rgb(var(--muted));
+  font-weight: 600;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--fast), color var(--fast);
+}
+.tab:hover { color: rgb(var(--text)); }
+.tab.on { background: rgb(var(--surface) / calc(0.1 * var(--glass))); color: rgb(var(--text)); }
+
+/* ── Empty state (EmptyState) ─────────────────────────────────────────── */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 28px;
+  text-align: center;
+  animation: fade 300ms var(--ease);
+}
+.empty-state > .tile-icon { width: 52px; height: 52px; border-radius: 50%; }
+.empty-state > .title { font-weight: 600; font-size: 15px; }
+.empty-state > .body { font-size: 12px; color: rgb(var(--muted)); }
+
+/* ── Key pickers (HotkeyInput) ────────────────────────────────────────── */
+
+.hotkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hotkey.listening {
+  border-color: rgb(var(--accent) / 0.65);
+  box-shadow: 0 0 0 3px rgb(var(--accent) / 0.12);
+  color: rgb(var(--muted));
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--accent));
+  animation: pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+
+/* ── Sliders (Slider) ─────────────────────────────────────────────────── */
+
+.slider { display: flex; align-items: center; gap: 10px; }
+.slider > .value {
+  width: 58px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: rgb(var(--muted));
+}
+
+/* ── Icons ────────────────────────────────────────────────────────────── */
+/* SVG markup from pious.ui.icon(name) (see docs/PLUGIN-UI.md). */
+
+.icon { display: inline-grid; place-items: center; width: 15px; height: 15px; flex: none; }
+.icon > svg { width: 100%; height: 100%; }
+.btn .icon, .chip .icon { width: 14px; height: 14px; }

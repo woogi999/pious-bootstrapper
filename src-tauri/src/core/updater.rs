@@ -1,15 +1,19 @@
 //! Updates from GitHub Releases.
 //!
-//! Each release carries `Pious-Setup.exe` (the installer) and `pious.exe`
-//! (the app alone, for copies run without installing). The app asks GitHub
-//! for the latest release and downloads the file that matches how it was
-//! set up, checking it against the SHA-256 digest GitHub publishes.
+//! Each release carries `manifest.json` and the zips it lists (the loose-file
+//! install), `Pious-Setup.exe` (the reusable installer) and `pious.exe` (the
+//! app alone, for copies run without installing). The app asks GitHub for
+//! the latest release and acts on how it was set up.
 //!
-//! Installed: the new installer runs in update mode, waits for Pious to
-//! close, replaces the files in the install folder and starts Pious again.
-//! Not installed: the new executable is swapped in for the running one
-//! (Windows won't let a running file be overwritten, but it can be renamed,
-//! so the old one is moved aside and deleted on the next start).
+//! Installed (`install.json`, `pious-setup.exe` or `uninstall.exe` next to
+//! the app): the setup program installed in the folder runs in update mode,
+//! waits for Pious to close, downloads and verifies the release itself,
+//! replaces the files in the install folder and starts Pious again. Only
+//! older installs without `pious-setup.exe` need `Pious-Setup.exe` fetched
+//! here, checked against the SHA-256 digest GitHub publishes.
+//! Not installed: `pious.exe` is downloaded, verified and swapped in for the
+//! running one (Windows won't let a running file be overwritten, but it can
+//! be renamed, so the old one is moved aside and deleted on the next start).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -24,22 +28,37 @@ use sha2::{Digest, Sha256};
 /// The GitHub repository releases are published to (`owner/name`).
 pub const REPOSITORY: &str = "woogi999/pious-bootstrapper";
 
-/// The installer, for installed copies.
+/// The installer, fetched only by installs that don't have their own copy.
 pub const SETUP_ASSET: &str = "Pious-Setup.exe";
 /// The app alone, for copies that weren't installed.
 pub const PORTABLE_ASSET: &str = "pious.exe";
+/// Present on every release the installer can install.
+pub const MANIFEST_ASSET: &str = "manifest.json";
+/// The installer's copy of itself inside the install folder.
+const SETUP_COPY: &str = "pious-setup.exe";
 
-/// Whether this copy was installed with the installer (it leaves its
-/// uninstaller next to the app).
+/// Whether `dir` (the folder holding the app) was set up by the installer.
+fn marks_install(dir: &Path) -> bool {
+    ["install.json", SETUP_COPY, "uninstall.exe"].iter().any(|name| dir.join(name).is_file())
+}
+
+/// Whether this copy was installed with the installer (it leaves
+/// `install.json`, `pious-setup.exe` or `uninstall.exe` next to the app).
 pub fn installed() -> bool {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| Some(exe.parent()?.join("uninstall.exe").is_file()))
+        .and_then(|exe| Some(marks_install(exe.parent()?)))
         .unwrap_or(false)
 }
 
+/// The installer already in the install folder, if there is one.
+fn own_setup() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|d| d.join(SETUP_COPY)).filter(|p| p.is_file())
+}
+
+/// The asset that makes a release usable by this copy.
 fn wanted_asset() -> &'static str {
-    if installed() { SETUP_ASSET } else { PORTABLE_ASSET }
+    if installed() { MANIFEST_ASSET } else { PORTABLE_ASSET }
 }
 
 /// The version of this build.
@@ -143,20 +162,30 @@ pub async fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     let wanted = wanted_asset();
-    let Some(asset) = release.assets.into_iter().find(|a| a.name.eq_ignore_ascii_case(wanted)) else {
+    if !release.assets.iter().any(|a| a.name.eq_ignore_ascii_case(wanted)) {
         return Ok(None);
-    };
+    }
+    // What this copy downloads itself: the app (portable), or the release's
+    // installer. Installed copies take the new installer even though they
+    // have one: it copies itself into the install folder as it updates, so
+    // fixes to the installer reach everyone. (Their own copy is the fallback
+    // if that download fails.)
+    let fetched = if installed() { SETUP_ASSET } else { PORTABLE_ASSET };
+    let asset = release.assets.into_iter().find(|a| a.name.eq_ignore_ascii_case(fetched));
 
     Ok(Some(Release {
         version: release.tag_name.trim_start_matches(['v', 'V']).to_owned(),
         notes: release.body.unwrap_or_default(),
         page: release.html_url,
-        download: asset.browser_download_url,
-        size: asset.size,
-        sha256: asset
-            .digest
-            .and_then(|d| d.strip_prefix("sha256:").map(str::to_ascii_lowercase)),
+        download: asset.as_ref().map(|a| a.browser_download_url.clone()).unwrap_or_default(),
+        size: asset.as_ref().map(|a| a.size).unwrap_or(0),
+        sha256: asset.and_then(|a| digest_hex(a.digest.as_deref())),
     }))
+}
+
+/// `sha256:ABC...` -> `abc...`.
+fn digest_hex(digest: Option<&str>) -> Option<String> {
+    digest.and_then(|d| d.strip_prefix("sha256:")).map(str::to_ascii_lowercase)
 }
 
 fn current_exe() -> Result<PathBuf, String> {
@@ -185,7 +214,14 @@ pub fn clean_up() {
 
 /// Downloads and verifies a release, reporting progress.
 pub async fn download(release: Release, mut events: Sender<Progress>) {
-    let result = fetch(&release, &mut events).await;
+    let mut result = if release.download.is_empty() { Err("This release doesn't include the installer.".to_owned()) } else { fetch(&release, &mut events).await };
+    // The new installer couldn't be fetched: the one in the install folder
+    // downloads and verifies the app itself just the same.
+    if result.is_err() && installed() {
+        if let Some(setup) = own_setup() {
+            result = Ok(setup);
+        }
+    }
     let _ = events
         .send(match result {
             Ok(path) => Progress::Ready(path),
@@ -196,6 +232,9 @@ pub async fn download(release: Release, mut events: Sender<Progress>) {
 
 async fn fetch(release: &Release, events: &mut Sender<Progress>) -> Result<PathBuf, String> {
     let staged = staged_path(&current_exe()?);
+    if release.download.is_empty() {
+        return Err("This release doesn't include the installer.".into());
+    }
 
     let response = client()
         .get(&release.download)
@@ -253,17 +292,13 @@ pub const AFTER_UPDATE: &str = "--after-update";
 pub fn install_and_restart(staged: &Path) -> Result<(), String> {
     let exe = current_exe()?;
     if installed() {
-        // The installer waits for this process to close, then updates.
+        // The installer waits for this process to close, then updates. It
+        // runs as administrator (its manifest says so), which a plain
+        // spawn can't start: ShellExecute asks Windows, which shows the
+        // usual permission prompt.
         let folder = exe.parent().ok_or("Couldn't find the install folder.")?;
-        return std::process::Command::new(staged)
-            .arg("--update")
-            .arg("--dir")
-            .arg(folder)
-            .arg("--wait")
-            .arg(std::process::id().to_string())
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Couldn't start the update ({e})."));
+        let args = format!("--update --dir \"{}\" --wait {}", folder.display(), std::process::id());
+        return run_as_admin(staged, &args);
     }
     let retired = retired_path(&exe);
     let _ = std::fs::remove_file(&retired);
@@ -282,9 +317,53 @@ pub fn install_and_restart(staged: &Path) -> Result<(), String> {
         .map_err(|e| format!("Updated, but couldn't restart ({e}). Open Pious again."))
 }
 
+/// Starts `exe` with `args` as administrator (Windows asks first).
+#[cfg(windows)]
+fn run_as_admin(exe: &Path, args: &str) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    let (file, params) = (HSTRING::from(exe.as_os_str()), HSTRING::from(args));
+    let result = unsafe { ShellExecuteW(None, w!("runas"), &file, &params, None, SW_SHOWNORMAL) };
+    // Above 32 means it started.
+    if result.0 as isize > 32 {
+        Ok(())
+    } else if result.0 as isize == 5 {
+        Err("The update needs your permission to install. Try again and choose Yes.".into())
+    } else {
+        Err(format!("Couldn't start the update (error {}).", result.0 as isize))
+    }
+}
+
+#[cfg(not(windows))]
+fn run_as_admin(exe: &Path, args: &str) -> Result<(), String> {
+    std::process::Command::new(exe).args(args.split(' ')).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_digests() {
+        assert_eq!(digest_hex(Some("sha256:ABcd")).as_deref(), Some("abcd"));
+        assert_eq!(digest_hex(Some("md5:abcd")), None);
+        assert_eq!(digest_hex(None), None);
+    }
+
+    #[test]
+    fn recognises_installed_folders() {
+        let dir = std::env::temp_dir().join(format!("pious-updater-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!marks_install(&dir));
+        for name in ["install.json", "pious-setup.exe", "uninstall.exe"] {
+            let marker = dir.join(name);
+            std::fs::write(&marker, b"x").unwrap();
+            assert!(marks_install(&dir), "{name}");
+            std::fs::remove_file(&marker).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn compares_versions() {

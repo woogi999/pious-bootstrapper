@@ -57,6 +57,12 @@ fn main() {
     }
 
     core::updater::clean_up();
+    // Older data folders move to where this copy keeps its data (before
+    // anything reads them).
+    core::store::migrate();
+    core::crash::install_panic_hook();
+    // Before any window or Discord connection exists.
+    core::discord::register();
 
     tauri::Builder::default()
         .plugin(service::hotkeys::plugin())
@@ -64,6 +70,12 @@ fn main() {
             // The window shows cached artwork and the background picture
             // straight from the data folder.
             let _ = app.asset_protocol_scope().allow_directory(core::store::data_dir(), true);
+            // Themes' and plugins' pictures, fonts and icons.
+            // (Every folder they're read from: in development builds also the
+            // repository's own, or plugin pages and engines load blank.)
+            for dir in service::plugins::dirs().into_iter().chain(service::themes::dirs()) {
+                let _ = app.asset_protocol_scope().allow_directory(dir, true);
+            }
 
             let service = Service::new(app.handle().clone());
             app.manage(service.clone());
@@ -86,6 +98,12 @@ fn main() {
             if let WindowEvent::Focused(true) = event {
                 if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
                     platform::memory::focused(&webview);
+                }
+                // Pious is in front: the taskbar badge has been seen.
+                if window.label() == "main" {
+                    if let Some(service) = window.app_handle().try_state::<service::Shared>() {
+                        service::taskbar::seen(&service);
+                    }
                 }
             }
             // The overlay closes when it loses focus (clicking back into the game).
@@ -212,11 +230,6 @@ fn main() {
             commands::stats_summary,
             commands::find_browser_sessions,
             commands::add_browser_session,
-            commands::run_macro,
-            commands::stop_automation,
-            commands::toggle_autoclicker,
-            commands::toggle_macro_recording,
-            commands::cursor_info,
             commands::cached_messages,
             commands::cached_conversations,
             commands::create_example_plugin,
@@ -226,16 +239,16 @@ fn main() {
             commands::set_shortcuts,
             commands::input_overlay_resize,
             commands::input_overlay_edit,
+            commands::stats_overlay_resize,
+            commands::stats_overlay_edit,
             commands::input_state,
             commands::media_now_playing,
             commands::notify_resize,
-            commands::import_ahk,
             commands::mcp_apps,
             commands::mcp_connect,
             commands::shiftlock_previews,
             commands::player_icon_previews,
             commands::pick_picture,
-            commands::export_ahk,
             commands::notify_test,
             commands::notify_take,
             commands::media_control,
@@ -244,6 +257,26 @@ fn main() {
             commands::read_json_file,
             commands::save_json_file,
             commands::create_shortcut,
+            commands::reset_tweaks,
+            commands::apply_theme,
+            commands::ui_assets,
+            commands::open_themes_folder,
+            commands::system_fonts,
+            commands::arrange_windows,
+            commands::read_crash,
+            commands::clear_crashes,
+            commands::open_crashes_folder,
+            commands::regions,
+            commands::overlay_pending,
+            commands::plugin_call,
+            commands::plugin_engines,
+            commands::plugin_request,
+            commands::cursor_previews,
+            commands::skybox_previews,
+            commands::search_games,
+            commands::pick_skybox_folder,
+            commands::graphics_adapters,
+            commands::startup_page,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Pious")

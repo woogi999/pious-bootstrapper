@@ -67,11 +67,37 @@ pub fn set_priority(pid: u32, priority: Option<&str>) {
 }
 
 #[cfg(windows)]
-mod registry {
+pub(crate) mod registry {
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
-        RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+        RegDeleteValueW, RegGetValueW, RegSetValueExW,
     };
+
+    /// A text value under HKEY_CURRENT_USER, if it's there.
+    pub fn get(path: &str, name: &str) -> Option<String> {
+        let (path, name) = (wide(path), wide(name));
+        let mut size: u32 = 0;
+        unsafe {
+            if RegGetValueW(HKEY_CURRENT_USER, path.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) != 0 {
+                return None;
+            }
+            let mut buffer = vec![0u16; (size as usize).div_ceil(2) + 1];
+            if RegGetValueW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr() as *mut _,
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+            let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            Some(String::from_utf16_lossy(&buffer[..end]))
+        }
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -114,7 +140,10 @@ mod registry {
 }
 
 #[cfg(not(windows))]
-mod registry {
+pub(crate) mod registry {
+    pub fn get(_path: &str, _name: &str) -> Option<String> {
+        None
+    }
     pub fn set(_path: &str, _name: &str, _value: &str) {}
     pub fn delete(_path: &str, _name: &str) {}
 }

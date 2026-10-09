@@ -20,7 +20,8 @@
     /** Pictures sit on a dark, game-like backdrop (for light crosshairs). */
     dark?: boolean;
     onpick: (id: string | null) => void;
-    oncustom: () => void;
+    /** Without it, there's no "Your own…" tile. */
+    oncustom?: () => void;
   } = $props();
 </script>
 
@@ -37,10 +38,12 @@
       <span class="name">{item.name}</span>
     </button>
   {/each}
+  {#if oncustom}
   <button class="tile" class:on={value === "custom"} {disabled} onclick={oncustom} title={custom ?? "Pick a picture"}>
     <span class="pic" class:dark><Icon name="folder" size={18} /></span>
     <span class="name">{value === "custom" && custom ? (custom.split(/[\\/]/).pop() ?? "Your own") : "Your own…"}</span>
   </button>
+  {/if}
 </div>
 
 <style>

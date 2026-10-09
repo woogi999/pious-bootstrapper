@@ -18,10 +18,11 @@ const UNFOCUSED_GRACE: Duration = Duration::from_secs(45);
 /// Windows that are closed for good after staying hidden this long, and
 /// made again when they're next needed: the main window (in the tray) and
 /// the pop-ups over games. The in-game overlay stays, so it opens at once.
-const RELEASE: [(&str, Duration); 4] = [
+const RELEASE: [(&str, Duration); 5] = [
     ("main", Duration::from_secs(120)),
     ("emoji", Duration::from_secs(60)),
     ("inputs", Duration::from_secs(60)),
+    ("stats", Duration::from_secs(60)),
     ("notify", Duration::from_secs(60)),
 ];
 

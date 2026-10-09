@@ -6,9 +6,9 @@
 //! event, and short messages for the user go out as `toast` events.
 
 mod accounts;
-pub mod automation;
 pub mod hotkeys;
 pub mod input;
+pub mod stats;
 mod integrations;
 mod launch;
 mod library;
@@ -16,10 +16,13 @@ pub mod mcp;
 mod news;
 pub mod notify;
 pub mod overlay;
+pub mod pluginapi;
 pub mod plugins;
 pub mod recorder;
 mod settings;
 mod social;
+pub mod taskbar;
+pub mod themes;
 mod versions;
 mod watch;
 pub mod windows;
@@ -176,6 +179,8 @@ pub struct State {
     pub foreground_roblox: Option<u32>,
     /// The input overlay's window.
     pub inputs: input::InputWindows,
+    /// The stats overlay is being moved (it takes the mouse while it is).
+    pub stats_editing: bool,
     /// The News page.
     pub news: news::News,
     /// Roblox Studio, while it's open and shown on Discord.
@@ -184,7 +189,6 @@ pub struct State {
     pub input_dirty: bool,
     pub capture: recorder::Capture,
     pub friends: social::Friends,
-    pub automation: automation::Automation,
     /// Roblox sign-ins found in browsers, waiting to be added.
     pub browser_sessions: Vec<accounts::BrowserSession>,
     /// The MCP server's address while it runs, and why it couldn't start.
@@ -193,6 +197,15 @@ pub struct State {
     pub splash_done: bool,
     /// Found on disk by [`Service::disk_loop`] (never read while locked).
     pub plugins: Vec<plugins::Plugin>,
+    pub themes: Vec<themes::Theme>,
+    /// Stylesheets, icons and sounds from plugins and the theme in use.
+    pub ui_assets: plugins::UiAssets,
+    /// Crash reports kept in the data folder (newest first).
+    pub crashes: Vec<crate::core::crash::Report>,
+    /// Roblox is being updated in the background.
+    pub roblox_updating: bool,
+    /// Plugins' hotkeys, status chips, styles and input watching.
+    pub plugin_runtime: pluginapi::Runtime,
     pub roblox_uninstallable: bool,
     /// Pious was installed (not run as a lone exe).
     pub installed: bool,
@@ -348,6 +361,11 @@ impl Service {
                     None
                 }
                 Err(error) => {
+                    if let Some(recovered) = error.recovered {
+                        s.bootstrapper = *recovered;
+                        // Saved (fixed) only once the original is backed up.
+                        s.dirty = error.can_overwrite;
+                    }
                     s.save_blocked = !error.can_overwrite;
                     s.load_error = Some(error.message.clone());
                     Some(error.message)
@@ -418,11 +436,50 @@ impl Service {
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.input_loop().await });
         let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.stats_loop().await });
+        let me = self.clone();
         tauri::async_runtime::spawn(async move { me.apps_loop().await });
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.online_loop().await });
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.notify_loop().await });
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.roblox_update_loop().await });
+        // Portable copies that used macros before they became a plugin
+        // folder get the folder, then the window gets plugins' and the
+        // theme's styles.
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tokio::task::spawn_blocking(plugins::ensure_macros_plugin).await;
+            // Macros kept in Pious's settings move into the Macros plugin.
+            let legacy = {
+                let s = me.read();
+                let p = &s.bootstrapper.preferences;
+                (serde_json::to_value(&p.macros).unwrap_or_default(), serde_json::to_value(&p.macro_settings).unwrap_or_default(), serde_json::to_value(&p.autoclicker).unwrap_or_default())
+            };
+            let moved = tokio::task::spawn_blocking(move || plugins::migrate_legacy_macros(&legacy.0, &legacy.1, &legacy.2)).await.unwrap_or(false);
+            if moved {
+                me.mutate(|s| {
+                    let p = &mut s.bootstrapper.preferences;
+                    p.macros = Default::default();
+                    p.macro_settings = Default::default();
+                    p.autoclicker = Default::default();
+                    s.dirty = true;
+                });
+            }
+            me.refresh_plugins().await;
+            // Plugins' engines start (in a hidden window).
+            let _ = tokio::task::spawn_blocking(plugins::refresh_sdk).await;
+            me.sync_plugin_host();
+            // Hotkeys were registered before the plugins folder was read:
+            // macros' keys only exist once their plugin is known to be there.
+            me.apply_hotkeys(true);
+            me.emit_theme_assets();
+            // Installed builds get the current tweaks (once the versions
+            // have been looked at).
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            me.apply_tweaks_everywhere().await;
+        });
         // "Playing Pious" on Discord from the start.
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.sync_presence().await });
@@ -526,8 +583,15 @@ impl Service {
                     .collect()
             };
             if exited.is_empty() {
+                // Windows closed from Pious don't come through here: let go
+                // of their kept handles every few seconds.
+                if tick % 10 == 0 {
+                    let watched: Vec<u32> = self.read().instances.iter().filter_map(|i| i.pid).collect();
+                    process::prune_exit_codes(&watched);
+                }
                 continue;
             }
+            self.report_crashes(&exited);
             // Crashed windows are rejoined (when that's on) instead.
             let mut closed = Vec::new();
             for (id, game) in exited {
@@ -585,34 +649,149 @@ impl Service {
     /// tweaked, the plugins folder, and whether Roblox can be uninstalled.
     async fn disk_loop(self: Shared) {
         let mut tick = 0u64;
+        let mut last_assets = None;
+        let mut last_macros = plugins::macros_present();
+        // Plugins and themes are only read again when their folders change.
+        let mut last_folders: Option<(u64, std::collections::BTreeSet<String>)> = None;
         loop {
-            let paths: Vec<std::path::PathBuf> = {
+            let (paths, enabled, theme) = {
                 let s = self.read();
-                s.bootstrapper
-                    .versions
-                    .iter()
-                    .flat_map(|v| [v.executable(), crate::core::tweaks::applied_marker(&v.path)])
-                    .collect()
+                let paths: Vec<std::path::PathBuf> =
+                    s.bootstrapper.versions.iter().flat_map(|v| [v.executable(), crate::core::tweaks::applied_marker(&v.path)]).collect();
+                let p = &s.bootstrapper.preferences;
+                (paths, p.plugins.clone(), p.appearance.theme.clone())
             };
+            // While a game is in front, look less often: nothing here is
+            // urgent, and Roblox should have the PC to itself.
+            let slow = self.read().in_game;
             let registry = tick % 10 == 0;
+            let previous = last_folders.clone();
             let found = tokio::task::spawn_blocking(move || {
                 crate::core::fscache::refresh(paths);
-                let plugins = plugins::list(&Default::default());
+                // Unchanged folders and settings: nothing to read again.
+                let key = (folders_signature(), enabled.clone());
+                if previous.as_ref() == Some(&key) {
+                    return None;
+                }
+                let plugins = plugins::list(&enabled);
+                let themes = themes::list(&plugins);
+                // Something about plugins or themes changed on disk: the
+                // window's styles and icons may need to follow.
+                let assets_key: Vec<_> = plugins
+                    .iter()
+                    .filter(|p| p.enabled)
+                    .map(|p| (p.id.clone(), p.css.clone(), p.icons.len()))
+                    .chain(themes.iter().filter(|t| Some(&t.id) == theme.as_ref()).map(|t| (t.id.clone(), t.css.clone(), t.icons.len())))
+                    .collect();
+                Some((key, plugins, themes, assets_key))
+            })
+            .await
+            .ok()
+            .flatten();
+            // Pictures whose file is gone (the cache was cleared, by hand or
+            // by a cleaner) are fetched again instead of showing nothing.
+            let images: Vec<(String, String)> = if registry { self.read().images.iter().map(|(k, v)| (k.clone(), v.clone())).collect() } else { Vec::new() };
+            let others = tokio::task::spawn_blocking(move || {
                 let uninstallable = registry.then(|| crate::platform::system::uninstall_command("Roblox").is_some());
-                (plugins, uninstallable, updater::installed())
+                let crashes = registry.then(crate::core::crash::list);
+                let missing: Vec<String> = images.into_iter().filter(|(_, path)| !std::path::Path::new(path).is_file()).map(|(k, _)| k).collect();
+                (uninstallable, crashes, updater::installed(), missing)
             })
             .await;
-            if let Ok((plugins, uninstallable, installed)) = found {
+            if let Ok((_, _, _, missing)) = &others {
+                if !missing.is_empty() {
+                    self.mutate(|s| {
+                        for key in missing {
+                            s.images.remove(key);
+                        }
+                    });
+                    let me = self.clone();
+                    tauri::async_runtime::spawn(async move { me.ensure_artwork().await });
+                }
+            }
+            let others = others.map(|(u, c, i, _)| (u, c, i));
+            if let Ok((uninstallable, crashes, installed)) = others {
                 self.mutate(|s| {
-                    s.plugins = plugins;
                     if let Some(u) = uninstallable {
                         s.roblox_uninstallable = u;
+                    }
+                    if let Some(c) = crashes {
+                        s.crashes = c;
                     }
                     s.installed = installed;
                 });
             }
+            if let Some((key, plugins, themes, assets_key)) = found {
+                last_folders = Some(key);
+                self.mutate(|s| {
+                    s.plugins = plugins;
+                    s.themes = themes;
+                });
+                if last_assets.as_ref() != Some(&assets_key) {
+                    last_assets = Some(assets_key);
+                    self.emit_theme_assets();
+                }
+                // Engines follow the plugins on disk.
+                let _ = tokio::task::spawn_blocking(plugins::refresh_sdk).await;
+                self.sync_plugin_host();
+                // The Macros plugin came or went: its hotkeys follow.
+                if plugins::macros_present() != last_macros {
+                    last_macros = plugins::macros_present();
+                    self.apply_hotkeys(true);
+                }
+            }
             tick += 1;
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(if slow { 10 } else { 3 })).await;
+        }
+    }
+
+    /// Writes a crash report for each closed window whose process ended
+    /// with a crash code (when crash reports are on), and says so.
+    fn report_crashes(self: &Shared, exited: &[(Uuid, Uuid)]) {
+        let found: Vec<_> = {
+            let s = self.read();
+            // Read (and let go of) every exit code, wanted or not.
+            let codes: Vec<(Uuid, Option<u32>)> =
+                exited.iter().map(|(id, _)| (*id, s.instances.iter().find(|i| i.id == *id).and_then(|i| i.pid).and_then(process::exit_code))).collect();
+            if !s.bootstrapper.preferences.crash_reports {
+                return;
+            }
+            exited
+                .iter()
+                .filter_map(|(id, _)| {
+                    let instance = s.instances.iter().find(|i| i.id == *id)?;
+                    let code = codes.iter().find(|(c, _)| c == id).and_then(|(_, code)| *code)?;
+                    if !crate::core::crash::is_crash_code(code) {
+                        return None;
+                    }
+                    let game = s.bootstrapper.game(instance.game);
+                    let log = s.watches.get(id).and_then(|w| w.log.as_ref()).map(|l| l.path.clone());
+                    Some((
+                        game.map(|g| g.name.clone()).unwrap_or_else(|| "Roblox".into()),
+                        game.map(|g| g.place_id).unwrap_or_default(),
+                        instance.version.clone(),
+                        code,
+                        log,
+                        (Utc::now() - instance.started).num_minutes(),
+                    ))
+                })
+                .collect()
+        };
+        for (game, place, version, code, log, minutes) in found {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move {
+                let written = tokio::task::spawn_blocking(move || {
+                    crate::core::crash::report_roblox(&game, place, version.as_deref(), code, log.as_deref(), minutes).map(|_| game)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(game) = written {
+                    let crashes = tokio::task::spawn_blocking(crate::core::crash::list).await.unwrap_or_default();
+                    me.mutate(|s| s.crashes = crashes);
+                    me.toast(Tone::Caution, format!("Roblox crashed in {game}. A crash report is in Settings → About."));
+                }
+            });
         }
     }
 
@@ -669,7 +848,9 @@ impl Service {
             let wanted = {
                 let s = self.read();
                 let look = &s.bootstrapper.preferences.appearance;
-                look.see_through && look.blur == crate::core::model::Blur::Adjustable
+                // Never while a game is in front: screen captures 10 times a
+                // second cost the game frames, for a window nobody's looking at.
+                look.see_through && look.blur == crate::core::model::Blur::Adjustable && !s.in_game
             };
             if !wanted {
                 tokio::time::sleep(Duration::from_millis(400)).await;
@@ -715,23 +896,38 @@ impl Service {
     }
 }
 
+/// A cheap fingerprint of the plugins and themes folders: each folder in
+/// them, and when it, its manifest and its stylesheet last changed. Reading
+/// every plugin (walking its Roblox files) only happens when this changes.
+fn folders_signature() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut roots = vec![store::plugins_dir(), store::themes_dir()];
+    if cfg!(debug_assertions) {
+        let repo = plugins::repo_root();
+        roots.push(repo.join("plugins"));
+        roots.push(repo.join("themes"));
+    }
+    for root in roots {
+        root.hash(&mut hasher);
+        modified(&root).hash(&mut hasher);
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        let mut folders: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        folders.sort();
+        for folder in folders {
+            folder.hash(&mut hasher);
+            modified(&folder).hash(&mut hasher);
+            for file in ["plugin.json", "theme.json", "theme.css", "style.css"] {
+                modified(&folder.join(file)).hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 /// The release notes of every version, newest first.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
-
-/// "Control+Shift+KeyK" → "Ctrl + Shift + K".
-pub fn keys_label(combo: &str) -> String {
-    combo
-        .split('+')
-        .map(|part| match part {
-            "Control" => "Ctrl".to_owned(),
-            "Super" => "Win".to_owned(),
-            "Escape" => "Esc".to_owned(),
-            "Backquote" => "`".to_owned(),
-            p => p.trim_start_matches("Key").trim_start_matches("Digit").to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
 
 /// Everything the window draws, as JSON.
 pub fn snapshot(s: &State) -> Value {
@@ -789,10 +985,16 @@ pub fn snapshot(s: &State) -> Value {
         "news": s.news,
         "font_presets": crate::core::fonts::presets(),
         "roblox_uninstallable": s.roblox_uninstallable,
-        "automation": automation::status_of(&s.automation),
         "browser_sessions": s.browser_sessions,
         "mcp": s.mcp,
         "plugins": plugins::with_enabled(&s.plugins, &library.preferences.plugins),
+        "themes": s.themes,
+        "themes_dir": store::themes_dir(),
+        "plugins_dir": store::plugins_dir(),
+        "install_dir": store::install_root(),
+        "crashes": s.crashes,
+        "plugin_status": s.plugin_runtime.status,
+        "roblox_updating": s.roblox_updating,
         "installed": s.installed,
     })
 }

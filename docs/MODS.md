@@ -34,7 +34,7 @@ all on or off; off puts every file back the next time a game starts.
    everything.
 
 Roblox versions Pious installs live in
-`%LOCALAPPDATA%\Pious\Bootstrapper\Versions`. Versions from Roblox's own
+`Versions` in the data folder. Versions from Roblox's own
 installer or another bootstrapper are changed the same way, and restored the
 same way.
 
@@ -47,7 +47,7 @@ same way.
 Tweaks → **Mods folder → Open** opens it:
 
 ```
-%LOCALAPPDATA%\Pious\Bootstrapper\Modifications\
+<data folder>\Modifications\
 ```
 
 Everything in it is copied over the Roblox version, **in the same folder

@@ -1,9 +1,26 @@
-# Making a Pious plugin
+# Plugins and making one
 
-A plugin is a folder with a `plugin.json` and a web page. Pious shows the
-page in its sidebar. The page runs walled off from Pious, in a sandboxed
-frame. It can only reach Pious through messages, and only for the
-permissions its `plugin.json` asks for.
+A plugin is a folder with a `plugin.json`. It can bring any of:
+
+- **a page** in Pious's sidebar, which runs walled off from Pious, in a
+  sandboxed frame, and reaches Pious only through messages, for the
+  permissions its `plugin.json` asks for;
+- **Roblox files**: a death sound, cursors, the shift lock cursor, or any
+  sound or texture (see *Roblox files* below);
+- **themes**, a **stylesheet**, **icons** and **sounds** for Pious itself;
+- **a feature built into Pious** (`provides`), like Macros.
+
+A plugin that can't be read never stops Pious: Settings → Plugins lists it
+with the reason, and nothing from it is used.
+
+## Installing and removing plugins
+
+- **Install:** unzip the plugin's folder into the plugins folder (Settings →
+  Plugins → **Plugins folder**), then turn it on in Settings → Plugins.
+  Pious notices new folders within a few seconds.
+- **Turn off:** its switch in Settings → Plugins. Its Roblox files are taken
+  back out the next time a game starts.
+- **Remove:** delete its folder.
 
 The quickest start is **Settings → Plugins → Example plugin**. That
 writes a working plugin to the plugins folder; open its folder and edit it.
@@ -11,7 +28,7 @@ writes a working plugin to the plugins folder; open its folder and edit it.
 ## Where plugins live
 
 ```
-%LOCALAPPDATA%\Pious\Bootstrapper\plugins\
+<Pious's install folder>\plugins\      (or <data folder>\plugins without installing)
 └── my-plugin\
     ├── plugin.json        what it is and what it may do
     ├── index.html         its page (any name, set in plugin.json)
@@ -19,8 +36,7 @@ writes a working plugin to the plugins folder; open its folder and edit it.
     └── …                  anything else the page uses (CSS, JS, pictures)
 ```
 
-If you set `PIOUS_DATA` to keep Pious somewhere else, the plugins folder
-moves with it.
+Settings → Plugins → **Plugins folder** opens it.
 
 After you add or change a plugin, turn it on in **Settings → Plugins**.
 Pious checks the folder each time that page opens.
@@ -48,6 +64,18 @@ Pious checks the folder each time that page opens.
 | `page` | No | The HTML file to show, relative to the folder. It must stay inside the folder. Without a page, the plugin has nothing to show. |
 | `icon` | No (`puzzle`) | One of Pious's icon names, e.g. `game`, `friends`, `server`, `chat`, `stats`, `sparkles`, `bell`, `media`, `keyboard`, `macros`, `news`. |
 | `permissions` | No (none) | What the page may ask Pious for. See below. Unknown names are ignored. |
+| `provides` | No | A feature built into Pious this plugin turns on: `macros`. |
+| `client` | No | A folder in the plugin laid out like a Roblox version folder; each file replaces Roblox's at the same path. |
+| `replace` | No | Roblox file → plugin file, e.g. `{ "content/sounds/ouch.ogg": "oof.ogg" }`. |
+| `death_sound` | No | A sound for when your character dies (`content/sounds/ouch.ogg`). |
+| `cursor`, `cursor_far` | No | The mouse pointer pictures. |
+| `shiftlock` | No | The shift lock cursor picture. |
+| `themes` | No | Folders in the plugin, each with a `theme.json` (see Making a theme). |
+| `css` | No | A stylesheet applied to Pious's windows while the plugin is on. |
+| `icons` | No | Pious icon name → picture in the plugin (SVG or PNG). |
+| `sounds` | No | Pious sound → sound file (`notification`). |
+
+Every path is relative to the plugin's folder and must stay inside it.
 
 A plugin.json that can't be read doesn't stop Pious: Settings → Plugins
 shows the plugin with the reason it can't be used.
@@ -61,6 +89,10 @@ shows the plugin with the reason it can't be used.
 | `notify` | Show a notice in Pious (prefixed with the plugin's name). |
 | `navigate` | Open one of Pious's pages. |
 | `macros` | Run one of your macros by name (needs the Macros plugin on). |
+| `input` | Press keys, click, move and scroll (to the front window, or straight into a Roblox window in the background), read the screen, record the keyboard and mouse, and see Roblox's windows. |
+| `hotkeys` | Use keyboard shortcuts. |
+| `run` | Open programs, files and web links. |
+| `full` | Do anything Pious can: change every setting, call any of Pious's commands, restyle it. |
 | `links` | Open a web link (in Pious or your browser, as set in Settings). |
 
 Ask only for what the plugin needs. Settings lists each plugin's
@@ -146,10 +178,49 @@ Zip the folder. Whoever installs it unzips it into their plugins folder
 is rewritten by Pious, there's no need to ship your own copy, but it does
 no harm.
 
+## Roblox files
+
+A cursor pack, death sound or sound pack is a plugin with Roblox files and
+nothing else:
+
+```json
+{
+  "id": "classic-oof",
+  "name": "Classic oof",
+  "description": "The old death sound and the 2013 cursor.",
+  "death_sound": "oof.ogg",
+  "cursor": "cursor.png",
+  "cursor_far": "cursor-far.png"
+}
+```
+
+They're put in place with the tweaks, right before a game starts, while
+the plugin is on **and** Tweaks are on, and undone the same way: turn the
+plugin or Tweaks off and Roblox's own files come back. Order: Pious's own
+mods first, then plugins (by name), then your mods folder, which wins.
+Paths must stay inside Roblox's folder.
+
 ## Plugins that come with Pious
 
-**Macros** (macros and the auto-clicker) is built in and off until you turn
-it on in Settings → Plugins. It has no folder: its page is part of Pious.
+**Macros** (macros and the auto-clicker) is a plugin in `plugins\macros`,
+off until you turn it on in Settings → Plugins. All of it lives in that
+folder: its engine (`engine.js`: running macros, the auto-clicker,
+recording, AutoHotkey import and export), its page, and your macros
+(`data\macros.json`). Pious only gives it capabilities, the same ones any
+plugin can ask for: pressing keys and clicking (also straight into Roblox
+windows in the background), recording the keyboard and mouse, hotkeys,
+accurate timing and storage. Delete the folder and Macros is gone; put it
+back (or reinstall Pious) and it returns. AI apps' macro tools, the
+overlay and the logo's "Run macro" ask whichever plugin provides
+`macros`, so another plugin can replace it.
+
+## Engines: plugins that run in the background
+
+Add `"main": "engine.js"` to `plugin.json` and that script runs for as
+long as the plugin is on, whether its page is open or not. Use it for
+anything that must keep working: hotkeys, timers, watching games. A plugin
+can change anything in Pious with the `full` permission. Every method and
+event is in the **Plugin API reference**.
 
 ## When something's wrong
 

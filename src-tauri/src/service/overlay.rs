@@ -15,14 +15,25 @@ use crate::core::{process, store};
 
 pub const OVERLAY_WINDOW: &str = "overlay";
 
+/// What the overlay was last opened with, while it's open: a window that
+/// was only just made asks for it once its page is up (see
+/// [`pending_show`]), since the event that opened it came too early.
+static PENDING: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+pub fn pending_show() -> Option<serde_json::Value> {
+    PENDING.lock().ok()?.clone()
+}
+
 impl Service {
-    /// Makes the overlay window ahead of time so it opens instantly.
+    /// Makes the overlay window ahead of time so it opens instantly. Made
+    /// from a background thread: building a window inside a main-thread
+    /// call can hang on Windows, which left the overlay missing.
     pub fn prepare_overlay(&self) {
         if !self.read().bootstrapper.preferences.overlay.enabled {
             return;
         }
         let app = self.app().clone();
-        let _ = self.app().run_on_main_thread(move || {
+        tauri::async_runtime::spawn_blocking(move || {
             let _ = overlay_window(&app);
         });
     }
@@ -45,8 +56,15 @@ impl Service {
     /// clip-length prompt, no blur).
     fn show_overlay(self: &Shared, mode: &str, clip_max: Option<u32>) {
         let app = self.app().clone();
-        let Ok(window) = overlay_window(&app) else {
-            self.toast(Tone::Negative, "Couldn't open the overlay.");
+        // Not made yet: make it off this thread (hotkeys arrive on the
+        // window thread, where building a window can hang), then open it.
+        let Some(window) = app.get_webview_window(OVERLAY_WINDOW) else {
+            let me = self.clone();
+            let mode = mode.to_owned();
+            tauri::async_runtime::spawn_blocking(move || match overlay_window(me.app()) {
+                Ok(_) => me.show_overlay(&mode, clip_max),
+                Err(error) => me.toast(Tone::Negative, format!("Couldn't open the overlay ({error}).")),
+            });
             return;
         };
         let (blur, strength, dim) = {
@@ -87,6 +105,9 @@ impl Service {
             "mode": mode,
             "clip_max": clip_max,
         });
+        if let Ok(mut pending) = PENDING.lock() {
+            *pending = Some(payload.clone());
+        }
         let _ = window.show();
         let _ = window.set_always_on_top(true);
         let _ = window.set_focus();
@@ -95,6 +116,9 @@ impl Service {
 
     /// Asks the overlay to animate out; it calls [`Self::finish_hide_overlay`].
     pub fn hide_overlay(&self) {
+        if let Ok(mut pending) = PENDING.lock() {
+            *pending = None;
+        }
         let open = std::mem::replace(&mut self.read().overlay_open, false);
         if open {
             let _ = self.app().emit_to(OVERLAY_WINDOW, "overlay-hide", ());

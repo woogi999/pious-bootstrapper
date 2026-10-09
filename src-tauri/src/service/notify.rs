@@ -29,6 +29,15 @@ pub struct Notice {
     pub avatar: Option<String>,
     /// What clicking it does.
     pub action: Value,
+    /// The game it's about, for the game template (banner, icon, name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::core::roblox::GameCard>,
+}
+
+impl Notice {
+    pub fn new(id: String, kind: &'static str, title: String, body: String, avatar: Option<String>, action: Value) -> Self {
+        Self { id, kind, title, body, avatar, action, game: None }
+    }
 }
 
 type Value = serde_json::Value;
@@ -101,14 +110,14 @@ impl Service {
                         let name = who.map(|f| f.display_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| {
                             if c.name.is_empty() { "New message".into() } else { c.name.clone() }
                         });
-                        out.push(Notice {
-                            id: format!("message:{}:{updated}", c.id),
-                            kind: "message",
-                            title: name,
-                            body: c.preview.clone().unwrap_or_else(|| "Sent you a message".into()),
-                            avatar: who.and_then(|f| f.avatar.clone()),
-                            action: json!({ "chat": { "account": account, "user": other } }),
-                        });
+                        out.push(Notice::new(
+                            format!("message:{}:{updated}", c.id),
+                            "message",
+                            name,
+                            c.preview.clone().unwrap_or_else(|| "Sent you a message".into()),
+                            who.and_then(|f| f.avatar.clone()),
+                            json!({ "chat": { "account": account, "user": other } }),
+                        ));
                     }
                 }
             }
@@ -119,14 +128,14 @@ impl Service {
                     let fresh: Vec<_> = list.iter().filter(|r| seen.requests.insert(r.id) && seen.primed).collect();
                     let pictures = social::headshots(&token, &fresh.iter().map(|r| r.id).collect::<Vec<_>>()).await;
                     for r in fresh {
-                        out.push(Notice {
-                            id: format!("request:{}", r.id),
-                            kind: "friend_request",
-                            title: r.display_name.clone(),
-                            body: format!("@{} wants to be friends", r.username),
-                            avatar: pictures.get(&r.id).cloned(),
-                            action: json!({ "url": "https://www.roblox.com/users/friends#!/friend-requests" }),
-                        });
+                        out.push(Notice::new(
+                            format!("request:{}", r.id),
+                            "friend_request",
+                            r.display_name.clone(),
+                            format!("@{} wants to be friends", r.username),
+                            pictures.get(&r.id).cloned(),
+                            json!({ "url": "https://www.roblox.com/users/friends#!/friend-requests" }),
+                        ));
                     }
                 }
             }
@@ -135,17 +144,22 @@ impl Service {
             let playing: HashSet<u64> = friends.iter().filter(|f| f.status == FriendStatus::InGame).map(|f| f.id).collect();
             if prefs.friend_joins && seen.primed {
                 for f in friends.iter().filter(|f| playing.contains(&f.id) && !seen.in_game.contains(&f.id)) {
-                    out.push(Notice {
-                        id: format!("join:{}:{}", f.id, chrono::Utc::now().timestamp()),
-                        kind: "friend_join",
-                        title: f.display_name.clone(),
-                        body: match &f.location {
+                    let mut notice = Notice::new(
+                        format!("join:{}:{}", f.id, chrono::Utc::now().timestamp()),
+                        "friend_join",
+                        f.display_name.clone(),
+                        match &f.location {
                             Some(game) if !game.is_empty() => format!("Started playing {game}"),
                             _ => "Started playing".into(),
                         },
-                        avatar: f.avatar.clone(),
-                        action: json!({ "join": { "place": f.place_id, "job": f.job, "name": f.location, "account": account } }),
-                    });
+                        f.avatar.clone(),
+                        json!({ "join": { "place": f.place_id, "job": f.job, "name": f.location, "account": account } }),
+                    );
+                    // The game's banner and icon, when Roblox shares which.
+                    if let Some(place) = f.place_id {
+                        notice.game = crate::core::roblox::game_card(place).await.ok();
+                    }
+                    out.push(notice);
                 }
             }
             seen.in_game = playing;
@@ -155,14 +169,14 @@ impl Service {
                 if let Ok(unread) = social::unread_notifications(&token).await {
                     if seen.primed && unread > seen.unread {
                         let new = unread - seen.unread;
-                        out.push(Notice {
-                            id: format!("roblox:{unread}"),
-                            kind: "roblox",
-                            title: "Roblox".into(),
-                            body: if new == 1 { "You have a new notification".into() } else { format!("You have {new} new notifications") },
-                            avatar: None,
-                            action: json!({ "url": "https://www.roblox.com/notifications" }),
-                        });
+                        out.push(Notice::new(
+                            format!("roblox:{unread}"),
+                            "roblox",
+                            "Roblox".into(),
+                            if new == 1 { "You have a new notification".into() } else { format!("You have {new} new notifications") },
+                            None,
+                            json!({ "url": "https://www.roblox.com/notifications" }),
+                        ));
                     }
                     seen.unread = unread;
                 }
@@ -183,17 +197,33 @@ impl Service {
     /// Shows pop-ups (making their window if needed). They wait in a queue
     /// the window empties with [`take_notices`]: a window that's just been
     /// made isn't listening yet, and would miss them.
-    pub fn notify(&self, notices: Vec<Notice>) {
-        let app = self.app().clone();
-        let (seconds, sound) = {
+    ///
+    /// The window is made from a background task, never from the window
+    /// thread itself: building a window there (or from a command that runs
+    /// there, like "Try one" did) can hang on Windows, which left pop-ups,
+    /// and the app, stuck. A failure is said, not swallowed.
+    pub fn notify(self: &Shared, notices: Vec<Notice>) {
+        if notices.is_empty() {
+            return;
+        }
+        let (seconds, sound, style) = {
             let n = &self.read().bootstrapper.preferences.notifications;
-            (n.seconds.clamp(2, 60), n.sound)
+            (n.seconds.clamp(2, 60), n.sound, n.style.clone())
         };
-        let _ = self.app().run_on_main_thread(move || {
+        super::taskbar::attention(self, notices.len() as u32);
+        if let Ok(mut queue) = QUEUE.lock() {
+            // A window that never came up mustn't grow the queue forever.
+            let excess = queue.len().saturating_sub(20);
+            queue.drain(..excess);
+            queue.push(json!({ "notices": notices, "seconds": seconds, "sound": sound, "style": style }));
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = me.app().clone();
             let window = match app.get_webview_window(NOTIFY_WINDOW) {
                 Some(window) => window,
                 None => {
-                    let Ok(window) = WebviewWindowBuilder::new(&app, NOTIFY_WINDOW, WebviewUrl::App("index.html".into()))
+                    let built = WebviewWindowBuilder::new(&app, NOTIFY_WINDOW, WebviewUrl::App("index.html".into()))
                         .title("Pious notifications")
                         .decorations(false)
                         .transparent(true)
@@ -205,17 +235,22 @@ impl Service {
                         .focusable(false)
                         .inner_size(WIDTH, 10.0)
                         .visible(false)
-                        .build()
-                    else {
-                        return;
-                    };
-                    window
+                        .build();
+                    match built {
+                        Ok(window) => window,
+                        Err(error) => {
+                            // Say so; the next pop-up tries again.
+                            if let Ok(mut queue) = QUEUE.lock() {
+                                queue.clear();
+                            }
+                            me.toast(super::Tone::Negative, format!("Couldn't show the pop-up ({error})."));
+                            return;
+                        }
+                    }
                 }
             };
             let _ = window.set_always_on_top(true);
-            if let Ok(mut queue) = QUEUE.lock() {
-                queue.push(json!({ "notices": notices, "seconds": seconds, "sound": sound }));
-            }
+            // The window takes the queue when it starts, and again on this.
             let _ = app.emit_to(NOTIFY_WINDOW, "notify", ());
         });
     }

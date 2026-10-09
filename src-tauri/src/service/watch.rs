@@ -323,8 +323,66 @@ impl Service {
         let mut failed: Option<(String, Instant)> = None;
         // Whether Roblox windows have Pious's icon, to undo when it's turned off.
         let mut applied = false;
+        // Same for the window title and the CPU priority.
+        let mut titled = false;
+        let mut prioritized = false;
+        // Roblox clients looked at for their singleton event (multi-instance):
+        // how many times, or u8::MAX once it was closed.
+        let mut released: std::collections::HashMap<u32, u8> = Default::default();
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
+            // Nothing to look after without a Roblox window (saves waking
+            // the disk and the window manager every few seconds).
+            // Every Roblox window, not only the ones Pious started (games from
+            // roblox.com, other launchers…).
+            let mut pids: Vec<u32> = tokio::task::spawn_blocking(process::roblox_pids).await.unwrap_or_default();
+            for pid in self.read().instances.iter().filter_map(|i| i.pid) {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+            // Multi-instance: take Roblox's singleton names when they're free,
+            // and let go of them inside clients that already have one (Roblox
+            // started before Pious, by another launcher or from the website),
+            // or the next client would just hand its game to that one.
+            if self.read().bootstrapper.preferences.multi_instance {
+                process::set_multi_instance(true);
+                released.retain(|pid, _| pids.contains(pid));
+                // A client opens its event a moment after it starts, so one
+                // where it isn't found yet is looked at again, for about
+                // half a minute (one that started after Pious took the name
+                // never gets it at all).
+                let fresh: Vec<u32> = pids.iter().copied().filter(|pid| released.get(pid).is_none_or(|&tries| tries < 10)).collect();
+                if !fresh.is_empty() {
+                    let found = tokio::task::spawn_blocking({
+                        let fresh = fresh.clone();
+                        move || fresh.into_iter().filter(|&pid| crate::core::singleton::release(pid)).collect::<Vec<u32>>()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    for pid in fresh {
+                        let tries = released.entry(pid).or_insert(0);
+                        *tries = if found.contains(&pid) { u8::MAX } else { tries.saturating_add(1) };
+                    }
+                    process::set_multi_instance(true);
+                }
+            }
+            if pids.is_empty() {
+                // No windows left to undo anything on.
+                (applied, titled, prioritized) = (false, false, false);
+                let days = {
+                    let s = self.read();
+                    let t = &s.bootstrapper.preferences.tweaks;
+                    t.cleaner_days.filter(|_| t.enabled)
+                };
+                if let Some(days) = days {
+                    if cleaned.is_none_or(|at| at.elapsed() >= Duration::from_secs(24 * 3600)) {
+                        cleaned = Some(Instant::now());
+                        let _ = tokio::task::spawn_blocking(move || crate::core::cleaner::clean(days)).await;
+                    }
+                }
+                continue;
+            }
             // The Roblox window's icon.
             let wanted = {
                 let s = self.read();
@@ -348,7 +406,7 @@ impl Service {
                     };
                 }
                 if let Some((key, image)) = icon.clone() {
-                    let pids: Vec<u32> = self.read().instances.iter().filter_map(|i| i.pid).collect();
+                    let pids = pids.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         for window in pids.into_iter().filter_map(process::window_of) {
                             crate::core::playericon::set(window, &key, &image);
@@ -359,7 +417,7 @@ impl Service {
                 }
             } else if std::mem::take(&mut applied) {
                 icon = None;
-                let pids: Vec<u32> = self.read().instances.iter().filter_map(|i| i.pid).collect();
+                let pids = pids.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     for window in pids.into_iter().filter_map(process::window_of) {
                         crate::core::playericon::reset(window);
@@ -372,19 +430,33 @@ impl Service {
                 let t = &s.bootstrapper.preferences.tweaks;
                 (t.window_title.trim().to_owned(), t.enabled, t.cleaner_days, t.priority.clone().filter(|_| t.enabled))
             };
-            // Roblox's CPU priority (checked each time: Roblox can reset it).
+            // Roblox's CPU priority (checked each time: Roblox can reset it),
+            // and back to normal once the tweak is off.
             if let Some(priority) = priority {
-                let pids: Vec<u32> = self.read().instances.iter().filter_map(|i| i.pid).collect();
-                for pid in pids {
+                prioritized = true;
+                for &pid in &pids {
                     crate::core::compat::set_priority(pid, Some(&priority));
+                }
+            } else if std::mem::take(&mut prioritized) {
+                for &pid in &pids {
+                    crate::core::compat::set_priority(pid, None);
                 }
             }
             if enabled && !title.is_empty() {
-                let pids: Vec<u32> = self.read().instances.iter().filter_map(|i| i.pid).collect();
+                titled = true;
+                let pids = pids.clone();
                 // Waited for, so a slow window never piles up threads.
                 let _ = tokio::task::spawn_blocking(move || {
                     for pid in pids {
                         process::set_title(pid, &title);
+                    }
+                })
+                .await;
+            } else if std::mem::take(&mut titled) {
+                let pids = pids.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    for pid in pids {
+                        process::set_title(pid, "Roblox");
                     }
                 })
                 .await;

@@ -1,0 +1,7 @@
+/* Midnight: primary buttons blend the two accents. */
+.btn.primary {
+  background: linear-gradient(100deg, rgb(var(--accent)), rgb(var(--accent-2)));
+}
+.page-title {
+  letter-spacing: -0.01em;
+}

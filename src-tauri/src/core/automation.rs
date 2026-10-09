@@ -1,5 +1,7 @@
-//! Macros and the auto-clicker: playing keyboard and mouse input back the
-//! way real hardware sends it, and recording what the user does.
+//! Input capabilities: playing keyboard and mouse input the way real
+//! hardware sends it (or straight to a window in the background), and
+//! recording what the user does. The macro engine itself is the Macros
+//! plugin (`plugins/macros`); AI apps' input tools use the player here.
 //!
 //! Keys are named like the browser's `KeyboardEvent.code` ("KeyW",
 //! "Space", "ShiftLeft", "F5"), the same names hotkeys use.
@@ -8,74 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-/// A list of steps played back with a hotkey or from Pious.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Macro {
-    pub id: Uuid,
-    pub name: String,
-    /// Starts it, and stops it again while it runs. "" = none.
-    pub hotkey: String,
-    pub repeat: Repeat,
-    /// Runs for `Repeat::Times`.
-    pub times: u32,
-    /// Playback speed (2 = twice as fast).
-    pub speed: f32,
-    /// The hotkey only works while a Roblox window is in front.
-    pub game_only: bool,
-    /// Where its keys and clicks go.
-    pub target: InputTarget,
-    /// The accounts whose Roblox windows get them, for
-    /// [`InputTarget::Accounts`].
-    pub accounts: Vec<Uuid>,
-    pub steps: Vec<Step>,
-}
-
-/// Where macros and the auto-clicker send their input.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputTarget {
-    /// Straight to the Roblox window last used, in the background: you can
-    /// keep using your mouse and keyboard elsewhere, and the real pointer
-    /// never moves.
-    #[default]
-    Roblox,
-    /// Every Roblox window at once, in the background.
-    AllRoblox,
-    /// The Roblox windows of the accounts picked, in the background.
-    Accounts,
-    /// Like a real keyboard and mouse, into whatever window is in front.
-    System,
-}
-
-impl Default for Macro {
-    fn default() -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            name: "New macro".into(),
-            hotkey: String::new(),
-            repeat: Repeat::Once,
-            times: 3,
-            speed: 1.0,
-            game_only: false,
-            target: InputTarget::Roblox,
-            accounts: Vec::new(),
-            steps: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Repeat {
-    #[default]
-    Once,
-    Times,
-    /// Until its hotkey (or Stop) is pressed.
-    UntilStopped,
-    /// While its hotkey is held down.
-    WhileHeld,
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Press {
@@ -169,118 +103,6 @@ pub enum Step {
     Comment { text: String },
 }
 
-/// Recording settings and the hotkeys every macro shares.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MacroSettings {
-    /// Starts and stops recording a new macro.
-    pub record_hotkey: String,
-    /// Stops every macro and the auto-clicker.
-    pub stop_hotkey: String,
-    /// Record pointer movement too (not only where clicks happen).
-    pub record_moves: bool,
-    /// Keep the pauses between actions.
-    pub record_timing: bool,
-}
-
-impl Default for MacroSettings {
-    fn default() -> Self {
-        Self {
-            record_hotkey: "F7".into(),
-            stop_hotkey: "Shift+Escape".into(),
-            record_moves: false,
-            record_timing: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Autoclicker {
-    pub enabled: bool,
-    pub hotkey: String,
-    pub mode: ClickMode,
-    pub input: ClickInput,
-    pub button: Button,
-    /// The key pressed when `input` is `Key`.
-    pub key: String,
-    pub double: bool,
-    /// Time between clicks.
-    pub interval_ms: u32,
-    /// Up to this much extra time, at random.
-    pub random_ms: u32,
-    /// How long each click is held down.
-    pub hold_ms: u32,
-    /// Click here instead of where the pointer is.
-    pub fixed: Option<(i32, i32)>,
-    pub limit: ClickLimit,
-    pub limit_value: u32,
-    pub game_only: bool,
-    /// Where the clicks go.
-    pub target: InputTarget,
-    /// The accounts whose Roblox windows get them, for
-    /// [`InputTarget::Accounts`].
-    pub accounts: Vec<Uuid>,
-    /// The mouse button you hold or click for [`ClickMode::MouseHeld`] and
-    /// [`ClickMode::OnClick`].
-    pub trigger: Button,
-    /// Extra clicks for each of yours, for [`ClickMode::OnClick`].
-    pub burst: u32,
-}
-
-impl Default for Autoclicker {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            hotkey: "F6".into(),
-            mode: ClickMode::Toggle,
-            input: ClickInput::Mouse,
-            button: Button::Left,
-            key: "KeyE".into(),
-            double: false,
-            interval_ms: 100,
-            random_ms: 0,
-            hold_ms: 10,
-            fixed: None,
-            limit: ClickLimit::Unlimited,
-            limit_value: 100,
-            game_only: false,
-            target: InputTarget::Roblox,
-            accounts: Vec::new(),
-            trigger: Button::Left,
-            burst: 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClickMode {
-    /// Press the hotkey to start, again to stop.
-    #[default]
-    Toggle,
-    /// Clicks while the hotkey is held.
-    Hold,
-    /// Once the hotkey turns it on: clicks while you hold a mouse button.
-    MouseHeld,
-    /// Once the hotkey turns it on: each click of yours gets extra clicks.
-    OnClick,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClickInput {
-    #[default]
-    Mouse,
-    Key,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClickLimit {
-    #[default]
-    Unlimited,
-    Clicks,
-    Seconds,
-}
-
 // ── Playback ─────────────────────────────────────────────────────────────
 
 /// What a playback can ask of the app.
@@ -305,11 +127,12 @@ fn pause(ms: f64, stop: &AtomicBool) -> bool {
 }
 
 fn jitter(ms: u32) -> f64 {
-    if ms == 0 { 0.0 } else { rand::random::<f64>() * ms as f64 }
+    if ms == 0 { 0.0 } else { crate::core::random::unit() * ms as f64 }
 }
 
 /// Where playback sends its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum Sink {
     /// Like real hardware: whatever window is in front gets it, and the
     /// real pointer moves.
@@ -371,7 +194,7 @@ impl<'a> Out<'a> {
 
     fn char(&mut self, c: char) {
         match self.sink {
-            Sink::System => input::char(c),
+            Sink::System => input::text(c.encode_utf8(&mut [0; 4])),
             Sink::Windows(windows) => {
                 self.wake();
                 for &w in windows {
@@ -625,10 +448,6 @@ pub fn parse_color(text: &str) -> Option<(u8, u8, u8)> {
 }
 
 /// The color at a point on the screen, as `#RRGGBB`.
-pub fn color_at(x: i32, y: i32) -> Option<String> {
-    input::pixel(x, y).map(|(r, g, b)| format!("#{r:02X}{g:02X}{b:02X}"))
-}
-
 pub fn cursor() -> (i32, i32) {
     input::cursor()
 }
@@ -649,100 +468,137 @@ pub fn window_point(window: isize, fx: f64, fy: f64) -> (i32, i32) {
 }
 
 /// One auto-clicker click (or key press), as set up.
-fn click_once(settings: &Autoclicker, stop: &AtomicBool, out: &mut Out) {
-    if let Some((x, y)) = settings.fixed {
-        out.move_to(x, y);
-    }
-    let presses = if settings.double { 2 } else { 1 };
-    for i in 0..presses {
-        if i > 0 && !pause(30.0, stop) {
-            return;
-        }
-        match settings.input {
-            ClickInput::Mouse => {
-                out.button(settings.button, true);
-                if settings.hold_ms > 0 {
-                    pause(settings.hold_ms as f64, stop);
-                }
-                out.button(settings.button, false);
-            }
-            ClickInput::Key => {
-                out.key(&settings.key, true);
-                pause(settings.hold_ms.max(10) as f64, stop);
-                out.key(&settings.key, false);
-            }
-        }
-    }
-}
+// ── Capabilities for plugins ─────────────────────────────────────────────
+//
+// Single inputs, to the system (`None`, like real hardware) or straight to a
+// window in the background (`Some(handle)`). The macro engine lives in the
+// Macros plugin and drives these one by one (see docs/PLUGIN-API.md).
 
-/// Clicks until stopped or the limit is reached. Returns the clicks made.
-/// `allowed` says whether your own clicks count right now (for the modes
-/// that follow your mouse: only while Roblox is in front, if asked).
-pub fn autoclick(settings: &Autoclicker, stop: &AtomicBool, sink: &Sink, allowed: &dyn Fn() -> bool) -> u64 {
-    let mut out = Out::new(sink);
-    let start = Instant::now();
-    let mut clicks = 0u64;
-    let trigger = button_name(settings.trigger);
-    let mut seen = super::inputhook::presses(trigger);
-    // Extra clicks still owed for your clicks (`OnClick`).
-    let mut owed = 0u64;
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            break;
+pub mod caps {
+    use super::{Button, background, input};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// Roblox ignores input while it thinks it's in the background, so a
+    /// window gets "you're active" now and then before input reaches it.
+    fn wake(window: isize) {
+        static WOKEN: Mutex<Option<HashMap<isize, Instant>>> = Mutex::new(None);
+        let Ok(mut woken) = WOKEN.lock() else { return };
+        let map = woken.get_or_insert_with(HashMap::new);
+        if map.get(&window).is_none_or(|t| t.elapsed() > Duration::from_millis(400)) {
+            map.insert(window, Instant::now());
+            background::activate(window);
         }
-        match settings.limit {
-            ClickLimit::Clicks if clicks >= settings.limit_value as u64 => break,
-            ClickLimit::Seconds if start.elapsed().as_secs() >= settings.limit_value as u64 => break,
-            _ => {}
+    }
+
+    /// Where Pious keeps each background window's pointer (screen spot).
+    fn pointers() -> &'static Mutex<HashMap<isize, (i32, i32)>> {
+        static AT: std::sync::OnceLock<Mutex<HashMap<isize, (i32, i32)>>> = std::sync::OnceLock::new();
+        AT.get_or_init(Default::default)
+    }
+
+    pub fn key(target: Option<isize>, code: &str, down: bool) -> Result<(), String> {
+        if super::vk_of(code).is_none() {
+            return Err(format!("Pious doesn't know the key {code}."));
         }
-        let go = match settings.mode {
-            ClickMode::Toggle | ClickMode::Hold => true,
-            ClickMode::MouseHeld => super::inputhook::physically_down(trigger) && allowed(),
-            ClickMode::OnClick => {
-                let now = super::inputhook::presses(trigger);
-                if now > seen && allowed() {
-                    owed += (now - seen) * settings.burst.clamp(1, 50) as u64;
+        match target {
+            None => input::key(code, down),
+            Some(w) => {
+                wake(w);
+                background::key(w, code, down);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn text(target: Option<isize>, text: &str) {
+        match target {
+            None => input::text(text),
+            Some(w) => {
+                wake(w);
+                for c in text.chars() {
+                    background::char(w, c);
                 }
-                seen = now;
-                if owed > 0 {
-                    owed -= 1;
-                    true
+            }
+        }
+    }
+
+    pub fn button(target: Option<isize>, button: Button, down: bool, at: Option<(i32, i32)>) {
+        match target {
+            None => input::button(button, down),
+            Some(w) => {
+                wake(w);
+                let at = at.or_else(|| pointers().lock().ok().and_then(|p| p.get(&w).copied()));
+                background::button(w, button, down, at);
+            }
+        }
+    }
+
+    pub fn move_pointer(target: Option<isize>, x: i32, y: i32, relative: bool) {
+        match (target, relative) {
+            (None, false) => input::move_to(x, y),
+            (None, true) => input::move_by(x, y),
+            (Some(w), _) => {
+                let (x, y) = if relative {
+                    let (cx, cy) = pointers().lock().ok().and_then(|p| p.get(&w).copied()).unwrap_or_else(|| background::center(w));
+                    (cx + x, cy + y)
                 } else {
-                    false
+                    (x, y)
+                };
+                if let Ok(mut p) = pointers().lock() {
+                    p.insert(w, (x, y));
                 }
+                background::move_to(w, x, y);
             }
-        };
-        if !go {
-            // Waiting for you: check often, so it starts right away.
-            if !pause(4.0, stop) {
-                break;
-            }
-            continue;
-        }
-        // Your own click comes first.
-        if settings.mode == ClickMode::OnClick && !pause(settings.interval_ms.clamp(10, 60) as f64, stop) {
-            break;
-        }
-        click_once(settings, stop, &mut out);
-        clicks += 1;
-        let wait = settings.interval_ms.max(1) as f64 + jitter(settings.random_ms) - settings.hold_ms as f64;
-        if !pause(wait.max(1.0), stop) {
-            break;
         }
     }
-    out.release();
-    clicks
+
+    pub fn scroll(target: Option<isize>, notches: i32, horizontal: bool, at: Option<(i32, i32)>) {
+        match target {
+            None => input::scroll(notches, horizontal),
+            Some(w) => {
+                wake(w);
+                let at = at.or_else(|| pointers().lock().ok().and_then(|p| p.get(&w).copied()));
+                background::scroll(w, notches, horizontal, at);
+            }
+        }
+    }
+
+    /// The color at a screen spot, or in a window's own picture (even when
+    /// it's covered), as `#RRGGBB`.
+    pub fn pixel(target: Option<isize>, x: i32, y: i32) -> Option<String> {
+        let (r, g, b) = match target {
+            None => input::pixel(x, y)?,
+            Some(w) => background::pixel(w, x, y)?,
+        };
+        Some(format!("#{r:02X}{g:02X}{b:02X}"))
+    }
 }
 
-/// The input hook's name for a mouse button.
-pub fn button_name(button: Button) -> &'static str {
-    match button {
-        Button::Left => "MouseLeft",
-        Button::Right => "MouseRight",
-        Button::Middle => "MouseMiddle",
-        Button::Back => "MouseBack",
-        Button::Forward => "MouseForward",
-    }
+/// A button by the name plugins use ("Left", "MouseLeft"…).
+pub fn button_of(name: &str) -> Option<Button> {
+    mouse_button(name).or_else(|| mouse_button(&format!("Mouse{name}")))
+}
+
+/// What was recorded, as plugins see it (`ms` from the first event).
+pub fn events_json(events: &[(Instant, Event)]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let start = events.first().map(|(t, _)| *t);
+    events
+        .iter()
+        .map(|(t, e)| {
+            let ms = start.map_or(0, |s| t.saturating_duration_since(s).as_millis() as u64);
+            match *e {
+                Event::Key { vk, down } => json!({ "ms": ms, "kind": "key", "code": code_of(vk), "down": down }),
+                Event::Button { button, down, x, y } => {
+                    json!({ "ms": ms, "kind": "button", "button": format!("{button:?}"), "down": down, "x": x, "y": y })
+                }
+                Event::Move { x, y } => json!({ "ms": ms, "kind": "move", "x": x, "y": y }),
+                Event::Wheel { amount, horizontal } => json!({ "ms": ms, "kind": "scroll", "amount": amount, "horizontal": horizontal }),
+            }
+        })
+        .collect()
 }
 
 // ── Recording ────────────────────────────────────────────────────────────
@@ -756,126 +612,6 @@ pub enum Event {
     Wheel { amount: i32, horizontal: bool },
 }
 
-/// Turns recorded input into steps. `ignore` holds virtual keys to leave
-/// out (the record hotkey).
-pub fn to_steps(events: &[(Instant, Event)], ignore: &[u16], moves: bool, timing: bool) -> Vec<Step> {
-    let mut steps = Vec::new();
-    let mut last: Option<Instant> = None;
-    let mut last_move: Option<Instant> = None;
-    let mut down: Vec<u16> = Vec::new();
-    for (at, event) in events {
-        let gap = |steps: &mut Vec<Step>, last: &mut Option<Instant>| {
-            if let Some(previous) = *last {
-                let ms = at.duration_since(previous).as_millis() as u32;
-                if timing && ms >= 10 {
-                    steps.push(Step::Wait { ms, random_ms: 0 });
-                }
-            }
-            *last = Some(*at);
-        };
-        match *event {
-            Event::Key { vk, down: is_down } => {
-                if ignore.contains(&vk) {
-                    continue;
-                }
-                // Key repeat while held.
-                if is_down && down.contains(&vk) {
-                    continue;
-                }
-                if is_down {
-                    down.push(vk);
-                } else if !down.contains(&vk) {
-                    // Let go of a key pressed before recording started.
-                    continue;
-                } else {
-                    down.retain(|k| *k != vk);
-                }
-                let Some(key) = input::code_of(vk) else { continue };
-                gap(&mut steps, &mut last);
-                steps.push(Step::Key { key: key.into(), press: if is_down { Press::Down } else { Press::Up }, hold_ms: 0 });
-            }
-            Event::Button { button, down: is_down, x, y } => {
-                gap(&mut steps, &mut last);
-                if is_down && !moves {
-                    steps.push(Step::Move { x, y, relative: false, duration_ms: 0 });
-                }
-                steps.push(Step::Click { button, press: if is_down { Press::Down } else { Press::Up }, count: 1 });
-            }
-            Event::Move { x, y } => {
-                if !moves {
-                    continue;
-                }
-                // About 60 points a second is plenty.
-                if last_move.is_some_and(|t| at.duration_since(t) < Duration::from_millis(16)) {
-                    if let Some(Step::Move { x: px, y: py, .. }) = steps.last_mut() {
-                        *px = x;
-                        *py = y;
-                        continue;
-                    }
-                }
-                last_move = Some(*at);
-                gap(&mut steps, &mut last);
-                steps.push(Step::Move { x, y, relative: false, duration_ms: 0 });
-            }
-            Event::Wheel { amount, horizontal } => {
-                gap(&mut steps, &mut last);
-                steps.push(Step::Scroll { amount, horizontal });
-            }
-        }
-    }
-    simplify(steps)
-}
-
-/// Down + up of the same key or button with only a pause between becomes
-/// one tap.
-fn simplify(steps: Vec<Step>) -> Vec<Step> {
-    let mut out: Vec<Step> = Vec::new();
-    for step in steps {
-        match &step {
-            Step::Key { key, press: Press::Up, .. } => {
-                let n = out.len();
-                let (wait, at) = match out.last() {
-                    Some(Step::Wait { ms, .. }) if n >= 2 => (*ms, n - 2),
-                    _ if n >= 1 => (0, n - 1),
-                    _ => (0, usize::MAX),
-                };
-                if at != usize::MAX {
-                    if let Step::Key { key: k, press: Press::Down, .. } = &out[at] {
-                        if k == key {
-                            out.truncate(at);
-                            out.push(Step::Key { key: key.clone(), press: Press::Tap, hold_ms: wait });
-                            continue;
-                        }
-                    }
-                }
-                out.push(step);
-            }
-            Step::Click { button, press: Press::Up, .. } => {
-                let n = out.len();
-                let at = match out.last() {
-                    Some(Step::Wait { ms, .. }) if n >= 2 && *ms < 250 => n - 2,
-                    _ if n >= 1 => n - 1,
-                    _ => usize::MAX,
-                };
-                if at != usize::MAX {
-                    if let Step::Click { button: b, press: Press::Down, .. } = &out[at] {
-                        if b == button {
-                            out.truncate(at);
-                            out.push(Step::Click { button: *button, press: Press::Tap, count: 1 });
-                            continue;
-                        }
-                    }
-                }
-                out.push(step);
-            }
-            _ => out.push(step),
-        }
-    }
-    out
-}
-
-/// Starts recording the keyboard and mouse. Only one recording runs at a
-/// time.
 pub fn start_recording() -> Result<(), String> {
     input::start_recording()
 }
@@ -909,8 +645,9 @@ pub fn press(code: &str, down: bool) {
 }
 
 /// Types a character, like real hardware.
-pub fn type_char(c: char) {
-    input::char(c);
+/// Types a whole string at once (see `input::text`).
+pub fn type_text(text: &str) {
+    input::text(text);
 }
 
 /// The mouse button a name stands for ("MouseLeft", "MouseBack"…).
@@ -1095,10 +832,20 @@ mod input {
         send(&[keyboard(if scan == 0 { vk } else { 0 }, scan, if scan == 0 { flags & !KEYEVENTF_SCANCODE } else { flags })]);
     }
 
-    pub fn char(c: char) {
-        let mut units = [0u16; 2];
-        for unit in c.encode_utf16(&mut units).iter() {
-            send(&[keyboard(0, *unit, KEYEVENTF_UNICODE), keyboard(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]);
+    /// Types text in one go. Characters beyond the basic plane (most
+    /// emoji) are two UTF-16 halves; both go down before either comes up,
+    /// in one batch, or programs like Roblox get a lone half and show
+    /// nothing.
+    pub fn text(text: &str) {
+        let mut inputs = Vec::new();
+        for c in text.chars() {
+            let mut units = [0u16; 2];
+            let units = c.encode_utf16(&mut units);
+            inputs.extend(units.iter().map(|u| keyboard(0, *u, KEYEVENTF_UNICODE)));
+            inputs.extend(units.iter().map(|u| keyboard(0, *u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)));
+        }
+        if !inputs.is_empty() {
+            send(&inputs);
         }
     }
 
@@ -1494,7 +1241,7 @@ mod input {
         None
     }
     pub fn key(_code: &str, _down: bool) {}
-    pub fn char(_c: char) {}
+    pub fn text(_t: &str) {}
     pub fn button(_b: Button, _down: bool) {}
     pub fn move_to(_x: i32, _y: i32) {}
     pub fn move_by(_x: i32, _y: i32) {}
@@ -1523,29 +1270,6 @@ mod tests {
             let vk = vk_of(code).unwrap();
             assert_eq!(input::code_of(vk), Some(code), "{code}");
         }
-    }
-
-    #[test]
-    fn recorded_presses_become_taps() {
-        let t = Instant::now();
-        let at = |ms| t + Duration::from_millis(ms);
-        let events = vec![
-            (at(0), Event::Key { vk: 0x57, down: true }),
-            (at(120), Event::Key { vk: 0x57, down: true }),
-            (at(200), Event::Key { vk: 0x57, down: false }),
-            (at(700), Event::Button { button: Button::Left, down: true, x: 5, y: 6 }),
-            (at(760), Event::Button { button: Button::Left, down: false, x: 5, y: 6 }),
-        ];
-        let steps = to_steps(&events, &[], false, true);
-        assert_eq!(
-            steps,
-            vec![
-                Step::Key { key: "KeyW".into(), press: Press::Tap, hold_ms: 200 },
-                Step::Wait { ms: 500, random_ms: 0 },
-                Step::Move { x: 5, y: 6, relative: false, duration_ms: 0 },
-                Step::Click { button: Button::Left, press: Press::Tap, count: 1 },
-            ]
-        );
     }
 
     #[test]

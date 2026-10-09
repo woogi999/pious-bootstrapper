@@ -1,4 +1,5 @@
-//! Global hotkeys: the overlay, recording and clipping.
+//! Global hotkeys: the overlay, recording and clipping, and plugins' own
+//! (the Macros plugin's macros and auto-clicker).
 //!
 //! A hotkey set to "only in game" is caught by the input hook while a
 //! Roblox window (or the overlay) is in front, and kept from the game, so a
@@ -22,10 +23,8 @@ pub enum Action {
     Record,
     Clip,
     ManualClip,
-    Macro(uuid::Uuid),
-    Autoclick,
-    MacroRecord,
-    StopAutomation,
+    /// A plugin's hotkey (its place in `plugin_runtime.hotkeys`).
+    Plugin(u32),
 }
 
 impl Action {
@@ -35,10 +34,7 @@ impl Action {
             Action::Record => "recording",
             Action::Clip => "clipping",
             Action::ManualClip => "clipping a chosen length",
-            Action::Macro(_) => "a macro",
-            Action::Autoclick => "the auto-clicker",
-            Action::MacroRecord => "recording macros",
-            Action::StopAutomation => "stopping macros",
+            Action::Plugin(_) => "a plugin",
         }
     }
 }
@@ -60,21 +56,9 @@ impl Service {
             out.push((Action::Clip, r.clip_hotkey.clone(), r.game_only));
             out.push((Action::ManualClip, r.manual_clip_hotkey.clone(), r.game_only));
         }
-        // Macros and the auto-clicker are a plugin: no keys while it's off.
-        if p.plugins.contains(crate::core::model::MACROS_PLUGIN) {
-            for m in &p.macros {
-                out.push((Action::Macro(m.id), m.hotkey.clone(), m.game_only));
-            }
-            if p.autoclicker.enabled {
-                out.push((Action::Autoclick, p.autoclicker.hotkey.clone(), p.autoclicker.game_only));
-            }
-            // Always, so the first macro can be recorded too ("" turns it off).
-            out.push((Action::MacroRecord, p.macro_settings.record_hotkey.clone(), false));
-        }
-        // Only while something runs, so the key stays free otherwise.
-        let a = &s.automation;
-        if !a.running.is_empty() || a.clicker.is_some() || a.recording.is_some() {
-            out.push((Action::StopAutomation, p.macro_settings.stop_hotkey.clone(), false));
+        // Plugins' own hotkeys (only enabled plugins keep theirs).
+        for (i, (_, _, keys, game_only)) in s.plugin_runtime.hotkeys.iter().enumerate() {
+            out.push((Action::Plugin(i as u32), keys.clone(), *game_only));
         }
         out.retain(|(_, keys, _)| !keys.trim().is_empty());
         out
@@ -83,6 +67,17 @@ impl Service {
     /// Registers the hotkeys that apply right now. With `announce`,
     /// problems (a taken or invalid key) are shown.
     pub fn apply_hotkeys(&self, announce: bool) {
+        let problems = self.apply_hotkeys_report();
+        if announce {
+            for problem in problems {
+                self.toast(Tone::Caution, problem);
+            }
+        }
+    }
+
+    /// Registers the hotkeys that apply right now, and says what couldn't be.
+    pub fn apply_hotkeys_report(&self) -> Vec<String> {
+        let mut problems = Vec::new();
         let wanted = self.wanted_hotkeys();
         let in_game = self.read().in_game;
         let shortcuts = self.app().global_shortcut();
@@ -94,28 +89,20 @@ impl Service {
             if game_only {
                 // Checked now so mistakes show up when they're made.
                 if keys.parse::<Shortcut>().is_err() {
-                    if announce {
-                        self.toast(Tone::Caution, format!("{keys} isn't a key combination Pious can use for {}.", action.name()));
-                    }
+                    problems.push(format!("{keys} isn't a key combination Pious can use for {}.", action.name()));
                 } else if in_game_keys.iter().any(|(k, _)| k.eq_ignore_ascii_case(&keys)) {
-                    if announce {
-                        self.toast(Tone::Caution, format!("{keys} is already used for something else in Pious."));
-                    }
+                    problems.push(format!("{keys} is already used for something else in Pious."));
                 } else {
                     in_game_keys.push((keys, action));
                 }
                 continue;
             }
             let Ok(shortcut) = keys.parse::<Shortcut>() else {
-                if announce {
-                    self.toast(Tone::Caution, format!("{keys} isn't a key combination Pious can use for {}.", action.name()));
-                }
+                problems.push(format!("{keys} isn't a key combination Pious can use for {}.", action.name()));
                 continue;
             };
             if registered.contains_key(&shortcut.id()) {
-                if announce {
-                    self.toast(Tone::Caution, format!("{keys} is already used for something else in Pious."));
-                }
+                problems.push(format!("{keys} is already used for something else in Pious."));
                 continue;
             }
             match shortcuts.register(shortcut) {
@@ -123,9 +110,7 @@ impl Service {
                     registered.insert(shortcut.id(), action);
                 }
                 Err(error) => {
-                    if announce {
-                        self.toast(Tone::Caution, format!("Couldn't use {keys} for {}; another app may have it ({error}).", action.name()));
-                    }
+                    problems.push(format!("Couldn't use {keys} for {}; another app may have it ({error}).", action.name()));
                 }
             }
         }
@@ -135,6 +120,7 @@ impl Service {
             s.game_hotkeys = in_game_keys;
             s.input_dirty = true;
         }
+        problems
     }
 
     fn on_hotkey(self: &Shared, id: u32, pressed: bool) {
@@ -149,8 +135,16 @@ impl Service {
     }
 
     fn hotkey_action(self: &Shared, action: Action, pressed: bool) {
+        // A plugin's: the plugin hears about presses and releases alike.
+        if let Action::Plugin(i) = action {
+            let found = self.read().plugin_runtime.hotkeys.get(i as usize).map(|(p, id, ..)| (p.clone(), id.clone()));
+            if let Some((plugin, id)) = found {
+                self.plugin_event(&plugin, "engine", "hotkey", serde_json::json!({ "id": id, "pressed": pressed }));
+            }
+            return;
+        }
+        // Pious's own hotkeys act when pressed.
         if !pressed {
-            self.hotkey_released(action);
             return;
         }
         match action {
@@ -158,14 +152,8 @@ impl Service {
             Action::Record => self.toggle_recording(),
             Action::Clip => self.save_clip(None, Instant::now()),
             Action::ManualClip => self.ask_clip_length(),
-            Action::Macro(id) => {
-                if let Err(error) = self.run_macro(id) {
-                    self.toast(Tone::Caution, error);
-                }
-            }
-            Action::Autoclick => self.toggle_autoclicker(),
-            Action::MacroRecord => self.toggle_macro_recording(),
-            Action::StopAutomation => self.stop_automation(),
+            // Handled above.
+            Action::Plugin(_) => {}
         }
     }
 

@@ -51,15 +51,14 @@ impl Service {
             } else {
                 HashMap::new()
             };
-            use crate::core::automation::ClickMode;
             inputhook::Config {
                 watch: p.input_overlay.enabled,
                 remaps,
                 emoji: if p.emoji_shortcodes.in_roblox { roblox.clone() } else { HashSet::new() },
-                buttons: s.automation.clicker.is_some() && matches!(p.autoclicker.mode, ClickMode::MouseHeld | ClickMode::OnClick),
                 hotkeys: s.game_hotkeys.iter().enumerate().map(|(i, (keys, _))| (keys.clone(), i as u32)).collect(),
                 // The games, and Pious itself while its overlay is open.
                 hotkey_pids: roblox.iter().copied().chain(s.overlay_open.then(std::process::id)).collect(),
+                forward: !s.plugin_runtime.watching.is_empty(),
             }
         };
         inputhook::configure(config, events);
@@ -168,21 +167,44 @@ impl Service {
                 let app = self.app().clone();
                 let anchor = process::window_of(pid).and_then(process::client_rect);
                 let payload = json!({ "query": query, "matches": matches, "selected": selected });
-                let _ = self.app().run_on_main_thread(move || {
-                    let Ok(window) = popup_window(&app) else { return };
-                    // Under Roblox's chat box, at the top left of the game.
-                    if let Some((x, y, _w, h)) = anchor {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        let top = ((h as f64) * 0.36).min(300.0 * scale) as i32;
-                        let _ = window.set_position(PhysicalPosition::new(x + (18.0 * scale) as i32, y + top));
-                    }
-                    let _ = window.show();
-                    let _ = window.set_always_on_top(true);
-                    let _ = app.emit_to(EMOJI_WINDOW, "emoji-list", payload);
-                });
+                // Made here (this thread), never inside a main-thread call:
+                // building a window there can hang on Windows.
+                let fresh = app.get_webview_window(EMOJI_WINDOW).is_none();
+                let Ok(window) = popup_window(&app) else { return };
+                // Under Roblox's chat box, at the top left of the game.
+                if let Some((x, y, _w, h)) = anchor {
+                    let scale = window.scale_factor().unwrap_or(1.0);
+                    let top = ((h as f64) * 0.36).min(300.0 * scale) as i32;
+                    let _ = window.set_position(PhysicalPosition::new(x + (18.0 * scale) as i32, y + top));
+                }
+                let _ = window.show();
+                let _ = window.set_always_on_top(true);
+                if let Ok(mut latest) = LATEST_EMOJI.lock() {
+                    *latest = Some(payload.clone());
+                }
+                let _ = app.emit_to(EMOJI_WINDOW, "emoji-list", payload);
+                // A window that was just made isn't listening yet: say the
+                // newest list again once its page has loaded (never an older
+                // one: typing goes on meanwhile).
+                if fresh {
+                    std::thread::spawn(move || {
+                        for wait in [250, 600, 1200] {
+                            std::thread::sleep(Duration::from_millis(wait));
+                            if let Some(latest) = LATEST_EMOJI.lock().ok().and_then(|l| l.clone()) {
+                                let _ = app.emit_to(EMOJI_WINDOW, "emoji-list", latest);
+                            }
+                        }
+                    });
+                }
             }
             Event::Hotkey { id, pressed } => self.game_hotkey(id, pressed),
+            Event::Input { code, down } => self.plugin_input(code, down),
             Event::EmojiHide => {
+                if let Ok(mut latest) = LATEST_EMOJI.lock() {
+                    // An empty list: a late re-send hides it rather than
+                    // bringing back an old one.
+                    *latest = Some(json!({ "query": "", "matches": [], "selected": 0 }));
+                }
                 if let Some(window) = self.app().get_webview_window(EMOJI_WINDOW) {
                     let _ = window.hide();
                 }
@@ -217,8 +239,15 @@ impl Service {
             });
             return;
         }
-        let _ = self.app().run_on_main_thread(move || {
+        // Made off the window thread (building a window inside a main-thread
+        // call can hang on Windows); window calls are safe from any thread.
+        tauri::async_runtime::spawn_blocking(move || {
+            let fresh = app.get_webview_window(INPUTS_WINDOW).is_none();
             let Ok(window) = inputs_window(&app) else { return };
+            if fresh {
+                // Let its page load, or it misses "input-visible".
+                std::thread::sleep(Duration::from_millis(400));
+            }
             place(&app, &window, x, y);
             if let Ok(hwnd) = window.hwnd() {
                 process::exclude_from_capture(hwnd.0 as isize, !recordable);
@@ -287,7 +316,7 @@ impl Service {
 
 /// Puts the overlay at its spot on the screen the game is on (the one the
 /// pointer is on, else the main screen).
-fn place(app: &AppHandle, window: &WebviewWindow, x: f32, y: f32) {
+pub(super) fn place(app: &AppHandle, window: &WebviewWindow, x: f32, y: f32) {
     let monitor = app
         .cursor_position()
         .ok()
@@ -300,7 +329,10 @@ fn place(app: &AppHandle, window: &WebviewWindow, x: f32, y: f32) {
     }
 }
 
-fn overlay_builder<'a>(app: &'a AppHandle, label: &'a str, title: &str) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+/// The emoji list last sent, for re-sending to a window that was just made.
+static LATEST_EMOJI: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+pub(super) fn overlay_builder<'a>(app: &'a AppHandle, label: &'a str, title: &str) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
         .decorations(false)

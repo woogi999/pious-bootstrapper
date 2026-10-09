@@ -20,17 +20,18 @@ export type Page =
   | { name: "news" }
   | { name: "running" }
   | { name: "settings" }
+  | { name: "help"; doc?: string }
   | { name: "plugin"; id: string };
 
 /** The pages, in the order Ctrl 1–9 and 0 open them (later ones have no key until one is set). */
 export const NAV = ["home", "games", "servers", "friends", "accounts", "versions", "tweaks", "news", "running", "settings", "keybinds"] as const;
 
-/** The ID of the built-in Macros plugin (macros and the auto-clicker). */
+/** The ID of the Macros plugin (macros and the auto-clicker, in plugins/macros). */
 export const MACROS_PLUGIN = "pious.macros";
 
-/** Whether the built-in Macros plugin is turned on. */
+/** Whether macros are on: the Macros plugin is in the plugins folder and turned on. */
 export function macrosOn(): boolean {
-  return !!app.snap?.bootstrapper.preferences.plugins.includes(MACROS_PLUGIN);
+  return !!app.snap?.plugins.some((p) => p.provides === "macros" && p.enabled);
 }
 
 export const PAGE_TITLES: Record<string, string> = {
@@ -47,6 +48,7 @@ export const PAGE_TITLES: Record<string, string> = {
   news: "News",
   running: "Instances",
   settings: "Settings",
+  help: "Help",
   plugin: "Plugin",
 };
 

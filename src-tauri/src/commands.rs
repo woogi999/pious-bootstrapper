@@ -25,6 +25,15 @@ pub async fn look_up_game(service: Service<'_>, input: String) -> Reply<GameInfo
     service.look_up_game(input).await
 }
 
+/// Roblox experiences matching a name (Add Game's search).
+#[tauri::command]
+pub async fn search_games(query: String) -> Reply<Vec<crate::core::roblox::FoundGame>> {
+    if query.trim().chars().count() < 2 {
+        return Ok(Vec::new());
+    }
+    crate::core::roblox::search_games(&query).await
+}
+
 #[tauri::command]
 pub fn add_game(service: Service<'_>, info: GameInfo) -> Uuid {
     service.add_game(info)
@@ -375,33 +384,6 @@ pub async fn add_browser_session(service: Service<'_>, user: u64, reauth: Option
     service.add_browser_session(user, reauth).await
 }
 
-// ── Macros and the auto-clicker ──────────────────────────────────────────
-
-#[tauri::command]
-pub fn run_macro(service: Service<'_>, id: Uuid) -> Reply {
-    service.run_macro(id)
-}
-
-#[tauri::command]
-pub fn stop_automation(service: Service<'_>) {
-    service.stop_automation()
-}
-
-#[tauri::command]
-pub fn toggle_autoclicker(service: Service<'_>) {
-    service.toggle_autoclicker()
-}
-
-#[tauri::command]
-pub fn toggle_macro_recording(service: Service<'_>) {
-    service.toggle_macro_recording()
-}
-
-#[tauri::command]
-pub fn cursor_info() -> Value {
-    crate::service::automation::cursor_info()
-}
-
 // ── Chats, from the cache ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -536,6 +518,30 @@ pub fn shiftlock_previews(color: Option<String>) -> Vec<(String, String, String)
         .collect()
 }
 
+/// The sky presets: ID, name and a picture (data: URL).
+#[tauri::command]
+pub async fn skybox_previews() -> Vec<(String, String, String)> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use base64::Engine;
+        crate::core::skybox::PRESETS
+            .iter()
+            .filter_map(|(id, name)| {
+                let png = crate::core::skybox::preview_png(id)?;
+                Some(((*id).to_owned(), (*name).to_owned(), format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))))
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// The graphics cards Windows can run Roblox on, in Windows' order (for
+/// "specific GPU 1, 2…").
+#[tauri::command]
+pub fn graphics_adapters() -> Vec<String> {
+    crate::core::gpupref::adapters().into_iter().map(|a| a.name).collect()
+}
+
 /// The Roblox icon presets: ID, name and a picture (data: URL, downloaded
 /// the first time).
 #[tauri::command]
@@ -549,6 +555,24 @@ pub async fn player_icon_previews() -> Vec<(String, String, Option<String>)> {
     out
 }
 
+/// Every cursor style: (ID, name, a picture of its pointer). Downloaded
+/// once, all at the same time.
+#[tauri::command]
+pub async fn cursor_previews() -> Vec<(crate::core::model::CursorStyle, String, Option<String>)> {
+    use base64::Engine;
+    let cache = crate::core::store::data_dir().join("cache").join("mods");
+    let pictures = futures::future::join_all(crate::core::tweaks::CURSORS.iter().map(|(style, _)| {
+        let cache = cache.clone();
+        async move {
+            let (base, folder, _) = crate::core::tweaks::cursor_source(*style)?;
+            let bytes = crate::core::fonts::cached_download(&format!("{base}/{folder}/ArrowCursor.png"), &cache, &format!("{folder}-ArrowCursor.png")).await.ok()?;
+            Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+        }
+    }))
+    .await;
+    crate::core::tweaks::CURSORS.iter().zip(pictures).map(|((style, name), picture)| (*style, (*name).to_owned(), picture)).collect()
+}
+
 /// Picks a picture file (PNG, ICO, JPG). Returns its path.
 #[tauri::command]
 pub async fn pick_picture(title: String) -> Option<String> {
@@ -560,67 +584,20 @@ pub async fn pick_picture(title: String) -> Option<String> {
     Some(file.path().display().to_string())
 }
 
-/// Makes a macro from an AutoHotkey script: pasted `text`, or a file the
-/// user picks. Returns the new macro's ID and how many lines were kept as
-/// notes (not run), or nothing if the user cancelled.
+/// Picks the folder with a custom sky's six pictures and checks them first,
+/// so a folder Roblox can't use never gets saved.
 #[tauri::command]
-pub async fn import_ahk(service: Service<'_>, text: Option<String>) -> Reply<Option<serde_json::Value>> {
-    let (text, name) = match text {
-        Some(text) => (text, "AutoHotkey macro".to_owned()),
-        None => {
-            let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title("Import an AutoHotkey script")
-                .add_filter("AutoHotkey", &["ahk", "ah2", "txt"])
-                .pick_file()
-                .await
-            else {
-                return Ok(None);
-            };
-            let bytes = file.read().await;
-            if bytes.len() > 1024 * 1024 {
-                return Err("That file is too big to be a macro.".into());
-            }
-            let name = file.file_name().rsplit_once('.').map(|(n, _)| n.to_owned()).unwrap_or_else(|| file.file_name());
-            (String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}').to_owned(), name)
-        }
+pub async fn pick_skybox_folder() -> Result<Option<String>, String> {
+    let Some(folder) = rfd::AsyncFileDialog::new().set_title("The folder with your sky's six pictures").pick_folder().await else {
+        return Ok(None);
     };
-    let imported = crate::core::ahk::import(&text);
-    if imported.steps.is_empty() {
-        return Err("There was nothing Pious could turn into steps in that script.".into());
-    }
-    let m = crate::core::automation::Macro {
-        name,
-        hotkey: imported.hotkey.unwrap_or_default(),
-        steps: imported.steps,
-        ..Default::default()
-    };
-    let id = m.id;
-    service.mutate(|s| {
-        s.bootstrapper.preferences.macros.push(m);
-        s.dirty = true;
-    });
-    service.apply_hotkeys(false);
-    Ok(Some(serde_json::json!({ "id": id, "skipped": imported.skipped })))
-}
-
-/// Saves a macro as an AutoHotkey v2 script the user can run elsewhere.
-#[tauri::command]
-pub async fn export_ahk(service: Service<'_>, id: Uuid) -> Reply {
-    let found = service.read().bootstrapper.preferences.macros.iter().find(|m| m.id == id).cloned();
-    let m = found.ok_or("That macro isn't there anymore.")?;
-    let script = crate::core::ahk::export(&m);
-    let safe: String = m.name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
-    let Some(file) = rfd::AsyncFileDialog::new()
-        .set_file_name(format!("{}.ahk", safe.trim()))
-        .add_filter("AutoHotkey", &["ahk"])
-        .save_file()
+    let path = folder.path().to_path_buf();
+    let cache = crate::core::store::data_dir().join("cache");
+    let check = path.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::core::skybox::files("custom", Some(&check), &cache).map(|_| ()))
         .await
-    else {
-        return Ok(());
-    };
-    file.write(script.as_bytes()).await.map_err(|e| e.to_string())?;
-    service.toast(Tone::Positive, format!("Saved {}", file.file_name()));
-    Ok(())
+        .map_err(|e| e.to_string())??;
+    Ok(Some(path.display().to_string()))
 }
 
 /// Puts a shortcut on the desktop that opens a game with Pious.
@@ -656,17 +633,43 @@ pub fn notify_take() -> Vec<Value> {
     crate::service::notify::take_notices()
 }
 
-/// Shows a sample pop-up.
+/// Shows sample pop-ups: a message and a friend starting a game. Async, so
+/// it never runs on the window's thread (making the pop-up window from
+/// there could hang Pious).
 #[tauri::command]
-pub fn notify_test(service: Service<'_>) {
-    service.notify(vec![crate::service::notify::Notice {
-        id: format!("test:{}", uuid::Uuid::new_v4()),
-        kind: "message",
-        title: "Pious".into(),
-        body: "This is how a message from a friend pops up.".into(),
-        avatar: None,
-        action: serde_json::json!({ "main": true }),
-    }]);
+pub async fn notify_test(service: Service<'_>, kind: Option<String>) -> Reply {
+    use crate::service::notify::Notice;
+    let id = uuid::Uuid::new_v4();
+    let mut notices = Vec::new();
+    if kind.as_deref() != Some("game") {
+        notices.push(Notice::new(
+            format!("test:{id}:message"),
+            "message",
+            "Pious".into(),
+            "This is how a message from a friend pops up. Click it to reply.".into(),
+            None,
+            serde_json::json!({ "main": true }),
+        ));
+    }
+    if kind.as_deref() != Some("message") {
+        let mut game = Notice::new(
+            format!("test:{id}:game"),
+            "friend_join",
+            "A friend".into(),
+            "Started playing".into(),
+            None,
+            serde_json::json!({ "main": true }),
+        );
+        // A real game's banner, when Pious can reach Roblox.
+        let place = service.read().bootstrapper.games.iter().max_by_key(|g| g.last_played).map(|g| g.place_id).unwrap_or(1_818);
+        game.game = tokio::time::timeout(std::time::Duration::from_secs(4), crate::core::roblox::game_card(place)).await.ok().and_then(Result::ok);
+        if let Some(card) = &game.game {
+            game.body = format!("Started playing {}", card.name);
+        }
+        notices.push(game);
+    }
+    service.notify(notices);
+    Ok(())
 }
 
 /// The input overlay measured itself (logical pixels).
@@ -680,6 +683,20 @@ pub async fn input_overlay_resize(service: Service<'_>, width: f64, height: f64)
 #[tauri::command]
 pub async fn input_overlay_edit(service: Service<'_>, on: bool) -> Reply {
     service.input_overlay_edit(on);
+    Ok(())
+}
+
+/// The stats overlay measured itself.
+#[tauri::command]
+pub async fn stats_overlay_resize(service: Service<'_>, width: f64, height: f64) -> Reply {
+    service.stats_overlay_resize(width, height);
+    Ok(())
+}
+
+/// Starts or finishes dragging the stats overlay into place.
+#[tauri::command]
+pub async fn stats_overlay_edit(service: Service<'_>, on: bool) -> Reply {
+    service.stats_overlay_edit(on);
     Ok(())
 }
 
@@ -970,6 +987,10 @@ pub fn show_main(service: Service<'_>) {
 pub fn report_error(message: String) {
     use std::io::Write;
     let path = crate::core::store::data_dir().join("ui-errors.log");
+    // Kept small: the newest megabyte, and the one before.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1024 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("old.log"));
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{} {message}", chrono::Utc::now().to_rfc3339());
     }
@@ -981,4 +1002,133 @@ pub async fn quit(service: Service<'_>) -> Reply {
     service.save_now().await;
     service.app().exit(0);
     Ok(())
+}
+
+// ── Tweaks, themes, plugins ──────────────────────────────────────────────
+
+/// Every tweak back to normal, and what they changed undone.
+#[tauri::command]
+pub async fn reset_tweaks(service: Service<'_>) -> Reply {
+    service.reset_tweaks().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn apply_theme(service: Service<'_>, id: String) -> Reply {
+    service.apply_theme(&id)
+}
+
+/// The stylesheets, icons and sounds of enabled plugins and the theme in
+/// use (also sent as `ui-assets` whenever they change).
+#[tauri::command]
+pub fn ui_assets(service: Service<'_>) -> crate::service::plugins::UiAssets {
+    service.read().ui_assets.clone()
+}
+
+#[tauri::command]
+pub async fn open_themes_folder() -> Reply {
+    let dir = crate::core::store::themes_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(&dir).map_err(|e| e.to_string())
+}
+
+/// Font families installed on this PC.
+#[tauri::command]
+pub async fn system_fonts() -> Vec<String> {
+    tokio::task::spawn_blocking(crate::core::sysfonts::installed).await.unwrap_or_default()
+}
+
+// ── Windows ──────────────────────────────────────────────────────────────
+
+/// Lays every Roblox window out over the screens.
+#[tauri::command]
+pub async fn arrange_windows(service: Service<'_>, layout: Option<String>) -> Reply<usize> {
+    service.arrange_windows(layout).await
+}
+
+// ── Crash reports ────────────────────────────────────────────────────────
+
+/// A crash report's text (only files in the crash reports folder).
+#[tauri::command]
+pub async fn read_crash(file: std::path::PathBuf) -> Reply<String> {
+    let dir = crate::core::crash::dir();
+    let inside = file.canonicalize().ok().zip(dir.canonicalize().ok()).is_some_and(|(f, d)| f.starts_with(d));
+    if !inside {
+        return Err("That isn't a crash report.".into());
+    }
+    std::fs::read_to_string(file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_crashes(service: Service<'_>) -> Reply {
+    let dir = crate::core::crash::dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "txt")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    service.mutate(|s| s.crashes.clear());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_crashes_folder() -> Reply {
+    let dir = crate::core::crash::dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(&dir).map_err(|e| e.to_string())
+}
+
+/// The overlay's last "show", while it's open (for a window whose page
+/// loaded after it was opened).
+#[tauri::command]
+pub fn overlay_pending() -> Option<Value> {
+    crate::service::overlay::pending_show()
+}
+
+// ── Plugin API ───────────────────────────────────────────────────────────
+
+/// A call from a plugin's page or engine, passed on by its host window
+/// (which knows which plugin the frame is). See docs/PLUGIN-API.md.
+#[tauri::command]
+pub async fn plugin_call(service: Service<'_>, plugin: String, side: String, method: String, args: Vec<Value>) -> Reply<Value> {
+    service.plugin_call(&plugin, &side, &method, args).await
+}
+
+/// The engines that should run now: each enabled plugin with a `main`.
+#[tauri::command]
+pub fn plugin_engines(service: Service<'_>) -> Vec<Value> {
+    let s = service.read();
+    crate::service::plugins::with_enabled(&s.plugins, &s.bootstrapper.preferences.plugins)
+        .into_iter()
+        .filter(|p| p.enabled)
+        .filter_map(|p| {
+            let page = crate::service::pluginapi::engine_page(&p)?;
+            Some(serde_json::json!({ "id": p.id, "name": p.name, "permissions": p.permissions, "page": page }))
+        })
+        .collect()
+}
+
+/// Asks the plugin providing a feature for something (e.g. the overlay's
+/// macro buttons: `plugin_request("macros", "run", { id })`).
+#[tauri::command]
+pub async fn plugin_request(service: Service<'_>, feature: String, method: String, args: Value) -> Reply<Value> {
+    service.plugin_request(&feature, &method, args).await
+}
+
+/// The page `pious.exe --page <name>` asked to open (once), e.g. `games`,
+/// `settings` or `plugin:<id>`.
+#[tauri::command]
+pub fn startup_page() -> Option<String> {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Roblox's regions people can pick for public servers.
+#[tauri::command]
+pub fn regions() -> Vec<(&'static str, &'static str)> {
+    crate::core::region::REGIONS.to_vec()
 }

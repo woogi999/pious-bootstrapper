@@ -242,6 +242,8 @@ impl Service {
         let text = |key: &str| args[key].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
         match name {
             "get_status" => {
+                // Macros live in their plugin: ask it (nothing, if it's off).
+                let macros = self.plugin_request("macros", "status", json!({})).await.ok();
                 let s = self.read();
                 let lib = &s.bootstrapper;
                 Ok(json!({
@@ -253,8 +255,8 @@ impl Service {
                     })).collect::<Vec<_>>(),
                     "play_as": lib.play_account().map(|a| a.username.clone()),
                     "recording": s.capture.recording.is_some(),
-                    "macros_running": s.automation.running.len(),
-                    "autoclicker_on": s.automation.clicker.is_some(),
+                    "macros_running": macros.as_ref().and_then(|m| m["running"].as_array().map(Vec::len)).unwrap_or(0),
+                    "autoclicker_on": macros.as_ref().and_then(|m| m["clicking"].as_bool()).unwrap_or(false),
                     "pious_version": crate::core::updater::CURRENT,
                 }))
             }
@@ -279,12 +281,8 @@ impl Service {
                     "playing": f.location, "place_id": f.place_id,
                 })).collect::<Vec<_>>()))
             }
-            "list_macros" => {
-                let s = self.read();
-                Ok(json!(s.bootstrapper.preferences.macros.iter().map(|m| json!({
-                    "name": m.name, "hotkey": m.hotkey, "steps": m.steps.len(), "running": s.automation.running.contains_key(&m.id),
-                })).collect::<Vec<_>>()))
-            }
+            // Macros live in the Macros plugin: these ask it.
+            "list_macros" => self.plugin_request("macros", "list", json!({})).await,
             "get_stats" => Ok(serde_json::to_value(stats::summary()).unwrap_or_default()),
             "launch_game" => {
                 let wanted = text("game").ok_or("Say which game (its name, Pious ID or place ID).")?;
@@ -338,21 +336,11 @@ impl Service {
                 Ok(json!("Saving the clip."))
             }
             "run_macro" => {
-                let wanted = text("name").ok_or("Say which macro.")?.to_lowercase();
-                let id = self
-                    .read()
-                    .bootstrapper
-                    .preferences
-                    .macros
-                    .iter()
-                    .find(|m| m.name.to_lowercase() == wanted)
-                    .map(|m| m.id)
-                    .ok_or("No macro by that name.")?;
-                self.run_macro(id)?;
-                Ok(json!("Started (running it again stops it)."))
+                let wanted = text("name").ok_or("Say which macro.")?;
+                self.plugin_request("macros", "run", json!({ "name": wanted })).await
             }
             "stop_macros" => {
-                self.stop_automation();
+                self.plugin_request("macros", "stop", json!({})).await?;
                 Ok(json!("Stopped."))
             }
             "list_instances" => {
@@ -801,21 +789,29 @@ fn tools() -> Vec<Value> {
 }
 
 /// `pious.exe --mcp`: relays an AI app's stdio to the running Pious.
+///
+/// AI apps start every MCP server they know about as soon as they open (a
+/// Claude Code session, Cursor…), so this must never start Pious by itself
+/// just for that. While Pious isn't reachable, the handshake and the tool
+/// list are answered here, and only an actual tool call can start Pious,
+/// and only if the user allowed it (`mcp.start_on_demand`).
 pub fn stdio_bridge() {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(_) => return,
     };
     runtime.block_on(async {
-        let prefs = std::fs::read(store::data_file())
+        // Read without touching the data folder's layout (no migration here:
+        // the real Pious may be running and owns that).
+        let prefs = std::fs::read(store::data_file_readonly())
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .map(|v| v["preferences"]["mcp"].clone())
             .unwrap_or(Value::Null);
         let port = prefs["port"].as_u64().unwrap_or(47_823);
+        let start_on_demand = prefs["start_on_demand"].as_bool().unwrap_or(false);
         let url = format!("http://127.0.0.1:{port}/mcp");
-        let secret = token();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().connect_timeout(Duration::from_millis(800)).build().unwrap_or_default();
         let stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
         let mut lines = BufReader::new(stdin).lines();
@@ -824,31 +820,43 @@ pub fn stdio_bridge() {
             if line.trim().is_empty() {
                 continue;
             }
-            let mut reply = None;
-            for attempt in 0..40 {
-                match client.post(&url).bearer_auth(&secret).header("Content-Type", "application/json").body(line.clone()).send().await {
-                    Ok(response) => {
-                        reply = Some(response.text().await.unwrap_or_default());
-                        break;
-                    }
-                    Err(_) => {
-                        // Pious isn't running (or its server is off): start it in the tray.
-                        if !started {
-                            started = true;
-                            if let Ok(exe) = std::env::current_exe() {
-                                let _ = std::process::Command::new(exe).arg("--background").spawn();
-                            }
+            let message = serde_json::from_str::<Value>(&line).unwrap_or(Value::Null);
+            let method = message["method"].as_str().unwrap_or_default().to_owned();
+            let forward = |secret: Option<String>| {
+                let mut request = client.post(&url).header("Content-Type", "application/json").body(line.clone());
+                if let Some(secret) = secret {
+                    request = request.bearer_auth(secret);
+                }
+                request.send()
+            };
+            // Read each time: Pious may have made (or renewed) its token since
+            // this bridge started. Refused for the token means the same as
+            // unreachable to the AI app.
+            let answer = |response: reqwest::Response| async move {
+                if response.status() == reqwest::StatusCode::UNAUTHORIZED { None } else { Some(response.text().await.unwrap_or_default()) }
+            };
+            let mut reply = match forward(token_readonly()).await {
+                Ok(response) => answer(response).await,
+                Err(_) => None,
+            };
+            // Only a real tool call may wake Pious, and only when allowed.
+            if reply.is_none() && method == "tools/call" && start_on_demand && !started {
+                started = true;
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--background").spawn();
+                }
+                for _ in 0..30 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // The token may have just been made by the new Pious.
+                    if let Ok(response) = forward(token_readonly()).await {
+                        reply = answer(response).await;
+                        if reply.is_some() {
+                            break;
                         }
-                        if attempt == 39 {
-                            let id = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("id").cloned());
-                            if let Some(id) = id {
-                                reply = Some(rpc_error(id, -32000, "Pious isn't reachable. Open Pious and turn on \"Let AI apps use Pious\" in Settings → Plugins.").to_string());
-                            }
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
+            let reply = reply.or_else(|| offline_reply(&message, start_on_demand).map(|v| v.to_string()));
             if let Some(reply) = reply.filter(|r| !r.trim().is_empty()) {
                 let _ = stdout.write_all(reply.trim().as_bytes()).await;
                 let _ = stdout.write_all(b"\n").await;
@@ -856,4 +864,54 @@ pub fn stdio_bridge() {
             }
         }
     });
+}
+
+/// The token, if Pious has made one (never creates it or the data folder).
+fn token_readonly() -> Option<String> {
+    let text = std::fs::read_to_string(store::data_dir_readonly().join("mcp-token.txt")).ok()?;
+    Some(text.trim().to_owned()).filter(|t| t.len() >= 32)
+}
+
+/// What the bridge answers by itself while Pious isn't reachable, so the AI
+/// app connects at once (instead of timing out) without Pious starting.
+fn offline_reply(message: &Value, start_on_demand: bool) -> Option<Value> {
+    let id = message.get("id").cloned()?;
+    let params = &message["params"];
+    let not_running = if start_on_demand {
+        "Pious couldn't be started. Open Pious and turn on \"Let AI apps use Pious\" in Settings → Plugins."
+    } else {
+        "Pious isn't running (or \"Let AI apps use Pious\" is off). Open Pious first; it isn't started automatically unless \"Start Pious when an AI app needs it\" is on in Settings → Plugins."
+    };
+    Some(match message["method"].as_str().unwrap_or_default() {
+        "initialize" => json!({ "jsonrpc": "2.0", "id": id, "result": {
+            "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "pious", "title": "Pious", "version": crate::core::updater::CURRENT },
+            "instructions": "Pious is a Roblox launcher. It isn't running right now; tool calls will say so until the user opens it.",
+        } }),
+        "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+        "tools/list" => json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools() } }),
+        "tools/call" => json!({ "jsonrpc": "2.0", "id": id, "result": {
+            "content": [{ "type": "text", "text": not_running }],
+            "isError": true,
+        } }),
+        method => rpc_error(id, -32601, &format!("Unknown method {method}")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_bridge_answers_without_pious() {
+        let init = offline_reply(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }), false).unwrap();
+        assert_eq!(init["result"]["serverInfo"]["name"], "pious");
+        let list = offline_reply(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }), false).unwrap();
+        assert!(list["result"]["tools"].as_array().is_some_and(|t| !t.is_empty()));
+        let call = offline_reply(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "get_status" } }), false).unwrap();
+        assert_eq!(call["result"]["isError"], true);
+        // Notifications get no answer.
+        assert!(offline_reply(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), false).is_none());
+    }
 }

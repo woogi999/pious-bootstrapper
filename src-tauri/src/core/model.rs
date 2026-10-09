@@ -384,6 +384,11 @@ pub struct Preferences {
     pub search_blur: f32,
     /// What Discord shows as the activity's name.
     pub discord_display: DiscordDisplay,
+    /// Which Discord application the presence comes from: its name heads
+    /// the card ("Roblox" or "Pious") and its icon shows when the game's
+    /// picture can't.
+    #[serde(default)]
+    pub discord_app: DiscordApp,
     pub appearance: Appearance,
     /// Grid or list, per page ("games", "servers", "versions"…).
     pub views: std::collections::BTreeMap<String, ViewMode>,
@@ -410,9 +415,14 @@ pub struct Preferences {
     pub seen_tips: std::collections::BTreeSet<String>,
     /// The last version whose changes were shown.
     pub seen_version: String,
-    pub macros: Vec<crate::core::automation::Macro>,
-    pub macro_settings: crate::core::automation::MacroSettings,
-    pub autoclicker: crate::core::automation::Autoclicker,
+    /// Macros from before they moved into the Macros plugin. Read once, to
+    /// move them into the plugin's data (see `plugins::migrate_legacy_macros`).
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub macros: serde_json::Value,
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub macro_settings: serde_json::Value,
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub autoclicker: serde_json::Value,
     /// Plugins that are turned on, by ID.
     pub plugins: std::collections::BTreeSet<String>,
     /// Lets AI apps control Pious through the Model Context Protocol.
@@ -447,10 +457,44 @@ pub struct Preferences {
     pub server_location: bool,
     /// Keys and mouse buttons drawn over the game, like streamers use.
     pub input_overlay: InputOverlay,
+    /// FPS, ping, players and more drawn over the game.
+    #[serde(default)]
+    pub stats_overlay: StatsOverlay,
     /// Keys and buttons that press something else in Roblox.
     pub keybinds: Keybinds,
     /// Discord-style :shortcodes: that turn into emoji.
     pub emoji_shortcodes: EmojiShortcodes,
+    /// Windows taskbar: flashing and badges.
+    pub taskbar: Taskbar,
+    /// Keep Roblox up to date in the background.
+    pub auto_update_roblox: bool,
+    /// Keep crash reports (Pious's and Roblox's) in the data folder.
+    pub crash_reports: bool,
+    /// Where public servers are joined: "auto" (Roblox's matchmaking),
+    /// "best_ping" or a region ID (see `core::region`).
+    pub region: String,
+    /// How Auto arrange lays out Roblox windows: "grid", "columns", "rows"
+    /// or "cascade".
+    pub arrange_layout: String,
+}
+
+/// What Pious does with its taskbar button.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Taskbar {
+    /// Flash the taskbar button when something needs attention while Pious
+    /// isn't in front (a message, a finished download).
+    pub flash: bool,
+    /// A count badge on the taskbar button for unread pop-ups.
+    pub badge: bool,
+    /// Download progress on the taskbar button.
+    pub progress: bool,
+}
+
+impl Default for Taskbar {
+    fn default() -> Self {
+        Self { flash: true, badge: true, progress: true }
+    }
 }
 
 /// Streaming and recording programs that turn streamer mode on.
@@ -484,6 +528,54 @@ pub struct EmojiShortcodes {
 impl Default for EmojiShortcodes {
     fn default() -> Self {
         Self { in_app: true, in_roblox: false }
+    }
+}
+
+/// Live numbers about the game drawn over it (frame rate, the server's
+/// ping and players, where it is…), like the input overlay but for stats.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatsOverlay {
+    pub enabled: bool,
+    /// What it shows, in this order: "fps", "ping", "players", "server_fps",
+    /// "location", "session", "cpu", "memory", "clock".
+    pub items: Vec<String>,
+    /// "row" (side by side) or "column".
+    pub layout: String,
+    /// Where it sits on the game's screen, as fractions (0–1) of the screen.
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    /// Colors as #RRGGBB or #RRGGBBAA.
+    pub background: String,
+    pub text_color: String,
+    pub label_color: String,
+    pub font: String,
+    pub opacity: f32,
+    /// Short labels ("FPS") instead of none.
+    pub labels: bool,
+    pub only_in_game: bool,
+    pub show_in_recordings: bool,
+}
+
+impl Default for StatsOverlay {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            items: ["fps", "ping", "players", "location", "session"].map(String::from).to_vec(),
+            layout: "row".into(),
+            x: 0.01,
+            y: 0.01,
+            scale: 1.0,
+            background: "#000000A6".into(),
+            text_color: "#FFFFFF".into(),
+            label_color: "#FFFFFFA0".into(),
+            font: "Manrope".into(),
+            opacity: 1.0,
+            labels: true,
+            only_in_game: true,
+            show_in_recordings: false,
+        }
     }
 }
 
@@ -661,11 +753,14 @@ pub struct Mcp {
     pub allow_actions: bool,
     /// Let AI apps take pictures of Roblox windows and listen to them.
     pub allow_senses: bool,
+    /// Let an AI app start Pious (in the tray) when it calls a tool while
+    /// Pious is closed. Off: AI apps never start Pious by themselves.
+    pub start_on_demand: bool,
 }
 
 impl Default for Mcp {
     fn default() -> Self {
-        Self { enabled: false, port: 47_823, allow_actions: true, allow_senses: true }
+        Self { enabled: false, port: 47_823, allow_actions: true, allow_senses: true, start_on_demand: false }
     }
 }
 
@@ -746,7 +841,9 @@ impl Default for Recorder {
             game_only: true,
             folder: None,
             file_name: "{game} {date} {time}".into(),
-            container: Container::Mp4,
+            // MOV and MP4 save the same way (a copy of what's recorded, no
+            // re-encoding), so neither is faster; MOV is the default.
+            container: Container::Mov,
             target: CaptureTarget::GameWindow,
             encoder: "auto".into(),
             codec: VideoCodec::H264,
@@ -864,6 +961,15 @@ pub enum LaunchBehavior {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiscordApp {
+    /// A Discord application named "Roblox", with Roblox's icon.
+    #[default]
+    Roblox,
+    /// Pious's own application.
+    Pious,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiscordDisplay {
     /// "Playing <game name>".
     #[default]
@@ -921,6 +1027,8 @@ pub struct Tweaks {
     pub gray_sky: bool,
     /// Grass that doesn't sway.
     pub still_grass: bool,
+    /// No grass at all (a real frame gain on terrain-heavy games).
+    pub no_grass: bool,
     /// Mesh detail 0 (lowest) – 4 (highest); `None` = automatic.
     pub mesh_detail: Option<u8>,
     /// The classic mouse cursor.
@@ -955,6 +1063,26 @@ pub struct Tweaks {
     /// Roblox's CPU priority ("above_normal" or "high"; `None` = normal).
     #[serde(default)]
     pub priority: Option<String>,
+    /// Anti-aliasing off (×0). Separate from `msaa`, where 0 means "Roblox
+    /// decides".
+    #[serde(default)]
+    pub msaa_off: bool,
+    /// Roblox's finer rendering quality, 1–21 (the old hidden setting the
+    /// 10-step slider is mapped onto); `None` leaves it to the slider.
+    #[serde(default)]
+    pub render_quality: Option<u8>,
+    /// The sky: a preset (see `core::skybox`), "custom" for `skybox_folder`,
+    /// or `None` for Roblox's own. Games with their own sky keep it.
+    #[serde(default)]
+    pub skybox: Option<String>,
+    #[serde(default)]
+    pub skybox_folder: Option<std::path::PathBuf>,
+    /// Which graphics card Windows runs Roblox on (Settings → System →
+    /// Display → Graphics): "default" (let Windows decide), "power_saving",
+    /// "high_performance", or "adapter:<n>" for a specific card; `None`
+    /// leaves Windows' setting alone.
+    #[serde(default)]
+    pub gpu: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -963,6 +1091,17 @@ pub enum CursorStyle {
     Default,
     From2006,
     From2013,
+    // From Voidstrap's cursor set.
+    BibataModernIce,
+    Clean,
+    Dot,
+    Fps,
+    Stoofs,
+    VerySmallWhiteDot,
+    WhiteDot,
+    // From Froststrap's cursor set.
+    BlackAndWhiteDot,
+    PurpleCross,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1015,12 +1154,32 @@ impl Tweaks {
         let id = self.active_profile?;
         self.flag_profiles.iter().find(|p| p.id == id)
     }
+
+    /// Every tweak back to Roblox's normal behavior. Saved FastFlag
+    /// profiles are kept (they're the user's work), just not used; the
+    /// master switch stays as it is.
+    pub fn reset(&mut self) {
+        let keep = (self.enabled, std::mem::take(&mut self.flag_profiles));
+        *self = Tweaks { enabled: keep.0, flag_profiles: keep.1, ..Tweaks::default() };
+    }
+
+    /// Whether every tweak is at its normal value (so having tweaks on
+    /// changes nothing).
+    pub fn is_neutral(&self) -> bool {
+        let mut plain = self.clone();
+        plain.enabled = Tweaks::default().enabled;
+        plain.flag_profiles = Vec::new();
+        plain.custom_flags.clear();
+        plain == Tweaks::default()
+    }
 }
 
 impl Default for Tweaks {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // On, with every tweak at its normal value: nothing changes until
+            // the user changes a tweak.
+            enabled: true,
             fps_limit: None,
             graphics: GraphicsApi::Automatic,
             msaa: 0,
@@ -1037,6 +1196,7 @@ impl Default for Tweaks {
             pause_voxelizer: false,
             gray_sky: false,
             still_grass: false,
+            no_grass: false,
             mesh_detail: None,
             cursor: CursorStyle::Default,
             old_character_sounds: false,
@@ -1052,6 +1212,11 @@ impl Default for Tweaks {
             disable_fullscreen_optimizations: false,
             dpi_override: None,
             priority: None,
+            msaa_off: false,
+            render_quality: None,
+            skybox: None,
+            skybox_folder: None,
+            gpu: None,
         }
     }
 }
@@ -1091,7 +1256,9 @@ impl Default for Overlay {
             enabled: true,
             hotkey: "Home".into(),
             blur: OverlayBlur::Adjustable,
-            blur_strength: 0.5,
+            // Light by default: a heavy blur costs more to draw and hides
+            // more of the game.
+            blur_strength: 0.25,
             dim: 0.35,
             widgets: Default::default(),
             game_only: true,
@@ -1128,6 +1295,9 @@ pub struct Notifications {
     pub sound: bool,
     /// How long one stays, in seconds.
     pub seconds: u32,
+    /// "rich": each kind its own look (a game's banner, a chat bubble);
+    /// "compact": one small card for everything.
+    pub style: String,
 }
 
 impl Default for Notifications {
@@ -1141,6 +1311,7 @@ impl Default for Notifications {
             in_game: true,
             sound: true,
             seconds: 6,
+            style: "rich".into(),
         }
     }
 }
@@ -1219,6 +1390,39 @@ pub struct Appearance {
     pub blur: Blur,
     /// How frosted the see-through blur looks (0 = light, 1 = heavy).
     pub blur_strength: f32,
+    /// The theme these colors came from (a folder in `themes`, or a theme a
+    /// plugin brings). Its extras (CSS, icons, font file) apply while set.
+    pub theme: Option<String>,
+    /// A gradient over the background.
+    pub gradient: Gradient,
+    /// The interface font: "" for Pious's own (Manrope), or any font
+    /// installed on the PC, by family name.
+    pub font: String,
+    /// How round corners are (1 = Pious's own, 0 = square).
+    pub radius: f32,
+    /// Text size, as a factor of the normal size.
+    pub font_scale: f32,
+    /// A second accent for highlights and gradients (empty = the accent).
+    pub accent_2: String,
+}
+
+/// A linear gradient across the window's background.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gradient {
+    pub enabled: bool,
+    pub from: String,
+    pub to: String,
+    /// Degrees, like CSS (0 = upwards, 90 = to the right).
+    pub angle: f32,
+    /// How strongly it shows (0–1).
+    pub opacity: f32,
+}
+
+impl Default for Gradient {
+    fn default() -> Self {
+        Self { enabled: false, from: "#2B1F4A".into(), to: "#0A0A0B".into(), angle: 135.0, opacity: 0.6 }
+    }
 }
 
 /// Background blur for the see-through window, provided by the OS.
@@ -1251,6 +1455,12 @@ impl Default for Appearance {
             glass: 1.0,
             blur: Blur::Frosted,
             blur_strength: 0.5,
+            theme: None,
+            gradient: Gradient::default(),
+            font: String::new(),
+            radius: 1.0,
+            font_scale: 1.0,
+            accent_2: String::new(),
         }
     }
 }
@@ -1284,6 +1494,7 @@ impl Default for Preferences {
             ui_scale: 1.0,
             search_blur: 0.5,
             discord_display: DiscordDisplay::GameName,
+            discord_app: DiscordApp::Roblox,
             appearance: Appearance::default(),
             views: [("versions".to_owned(), ViewMode::List)].into(),
             recorder: Recorder::default(),
@@ -1296,9 +1507,9 @@ impl Default for Preferences {
             onboarded: false,
             seen_tips: Default::default(),
             seen_version: String::new(),
-            macros: Vec::new(),
-            macro_settings: Default::default(),
-            autoclicker: Default::default(),
+            macros: serde_json::Value::Null,
+            macro_settings: serde_json::Value::Null,
+            autoclicker: serde_json::Value::Null,
             plugins: Default::default(),
             mcp: Mcp::default(),
             discord_join: true,
@@ -1315,15 +1526,21 @@ impl Default for Preferences {
             dns_custom: Vec::new(),
             server_location: true,
             input_overlay: InputOverlay::default(),
+            stats_overlay: StatsOverlay::default(),
             keybinds: Keybinds::default(),
             emoji_shortcodes: EmojiShortcodes::default(),
+            taskbar: Taskbar::default(),
+            auto_update_roblox: false,
+            crash_reports: true,
+            region: "auto".into(),
+            arrange_layout: "grid".into(),
         }
     }
 }
 
 /// Bumped when defaults change; settings still at an old default move to
 /// the new one (ones the user changed stay as they are).
-const DEFAULTS_VERSION: u32 = 4;
+const DEFAULTS_VERSION: u32 = 5;
 
 /// The built-in Macros plugin (macros and the auto-clicker), by ID in
 /// [`Preferences::plugins`].
@@ -1363,8 +1580,27 @@ impl Preferences {
         if self.defaults_version < 4 {
             // Macros became a plugin that starts off; anyone already using
             // them keeps them on.
-            if !self.macros.is_empty() || self.autoclicker.enabled {
+            if self.macros.as_array().is_some_and(|m| !m.is_empty()) || self.autoclicker["enabled"] == true {
                 self.plugins.insert(MACROS_PLUGIN.into());
+            }
+        }
+        if self.defaults_version < 5 {
+            // Tweaks became on by default with every tweak neutral. Someone
+            // who never changed a tweak gets the switch on (changing
+            // nothing); anyone who set tweaks up and turned them off keeps
+            // them off.
+            if !self.tweaks.enabled && self.tweaks.is_neutral() {
+                self.tweaks.enabled = true;
+            }
+            if self.overlay.blur_strength == 0.5 {
+                self.overlay.blur_strength = 0.25;
+            }
+            if self.region.is_empty() {
+                self.region = "auto".into();
+            }
+            // MOV became the default container.
+            if self.recorder.container == Container::Mp4 {
+                self.recorder.container = Container::Mov;
             }
         }
         self.defaults_version = DEFAULTS_VERSION;

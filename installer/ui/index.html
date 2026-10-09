@@ -226,8 +226,10 @@
           <div class="notes" id="notes" hidden><span class="label" id="notes-title">What's new</span><ul id="notes-list"></ul></div>
           <span class="spacer" id="notes-spacer"></span>
           <div class="actions">
-            <button class="btn primary" id="install">Install</button>
-            <span class="note" id="size"></span>
+            <button class="btn primary" id="install" disabled>Install</button>
+            <button class="btn" id="retry" hidden>Retry</button>
+            <button class="btn" id="offline" hidden>Use files next to this installer</button>
+            <span class="note" id="size">Checking for the latest version…</span>
           </div>
           <span class="warn" id="elsewhere" hidden>Another copy of Pious is open. Close it before opening the new one.</span>
           <span class="error" id="install-error"></span>
@@ -240,6 +242,7 @@
           <span class="spacer"></span>
           <div class="progress"><div id="bar"></div></div>
           <span class="stage-text" id="stage">Starting</span>
+          <div class="actions"><button class="btn primary" id="work-retry" hidden>Retry</button></div>
         </section>
 
         <!-- Done -->
@@ -356,48 +359,84 @@
         $("stage").textContent = payload.stage + (payload.total > 10 ? ` · ${Math.round(share * 100)}%` : "");
       });
 
+      let latest = null;
+      let offline = false;
+
+      // Asks GitHub for the newest release; shows its version and notes.
+      async function checkLatest() {
+        latest = null;
+        $("install").disabled = true;
+        $("retry").hidden = true;
+        $("install-error").textContent = "";
+        $("size").textContent = "Checking for the latest version…";
+        try {
+          latest = await invoke("latest");
+          offline = false;
+          const same = info.existing && info.existing_version === latest.version;
+          $("version").textContent = `Version ${latest.version}`;
+          $("install-title").textContent = info.existing ? (same ? "Reinstall Pious" : "Update Pious") : "Install Pious";
+          $("install").textContent = info.existing ? (same ? "Reinstall" : "Update") : "Install";
+          const total = latest.app_size + (info.has_ffmpeg ? 0 : latest.ffmpeg_size);
+          $("size").textContent = `${mb(total)} to download`;
+          $("offline").hidden = true;
+          // Warnings get the room instead.
+          if (latest.notes.length && !info.elsewhere) {
+            $("notes").hidden = false;
+            $("notes-spacer").hidden = true;
+            $("notes-title").textContent = `What's new in ${latest.version}`;
+            $("notes-list").replaceChildren(...latest.notes.map((note) => Object.assign(document.createElement("li"), { textContent: note })));
+          }
+          $("install").disabled = false;
+        } catch (e) {
+          $("size").textContent = "";
+          $("install-error").textContent = String(e);
+          $("retry").hidden = false;
+          if (info.local) {
+            $("offline").hidden = false;
+            $("offline").textContent = `Use ${info.local.file} next to this installer`;
+          }
+        }
+      }
+
       async function start() {
         info = await invoke("info");
         dir = info.dir;
-        $("version").textContent = `Version ${info.version}`;
         $("dir").textContent = dir;
         $("dir").title = dir;
-        $("size").textContent = `${mb(info.size)} on disk`;
         $("elsewhere").hidden = !info.elsewhere;
         if (info.existing) {
-          $("install-title").textContent = info.existing_version === info.version ? "Reinstall Pious" : "Update Pious";
           $("install-body").textContent = info.existing_version
             ? `Pious ${info.existing_version} is installed. Your library and settings stay as they are.`
             : "Pious is already installed. Your library and settings stay as they are.";
-          $("install").textContent = info.existing_version === info.version ? "Reinstall" : "Update";
-        }
-        // Warnings get the room instead.
-        if (info.notes && info.notes.length && !info.empty && !info.elsewhere) {
-          $("notes").hidden = false;
-          $("notes-spacer").hidden = true;
-          $("notes-title").textContent = `What's new in ${info.version}`;
-          for (const note of info.notes) {
-            const li = document.createElement("li");
-            li.textContent = note;
-            $("notes-list").appendChild(li);
-          }
-        }
-        if (info.empty) {
-          $("install").disabled = true;
-          $("install-error").textContent = "This installer was built without Pious inside it.";
         }
         if (info.mode === "uninstall") show("uninstall");
         else if (info.mode === "update") runUpdate();
-        else show("install");
+        else {
+          show("install");
+          checkLatest();
+        }
         await win.show();
       }
 
+      $("retry").onclick = checkLatest;
+      $("offline").onclick = () => {
+        offline = true;
+        $("version").textContent = `Version ${info.local.version}`;
+        runInstall();
+      };
+      $("work-retry").onclick = () => {
+        $("work-retry").hidden = true;
+        if (info.mode === "update") runUpdate();
+        else runInstall();
+      };
+
       async function runInstall() {
         $("working-title").textContent = info.existing ? "Updating Pious" : "Installing Pious";
+        $("working-body").textContent = offline ? "Using the files next to this installer." : "Downloading Pious from GitHub.";
         show("working");
         target = 1.2;
         try {
-          await invoke("install", { dir, desktop: $("desktop").checked });
+          await invoke("install", { dir, desktop: $("desktop").checked, offline });
           target = 0.2;
           flatTarget = 1;
           if ($("open").checked) {
@@ -414,7 +453,7 @@
       }
 
       async function runUpdate() {
-        $("working-title").textContent = `Updating Pious to ${info.version}`;
+        $("working-title").textContent = "Updating Pious";
         $("working-body").textContent = "Pious opens again when it's done.";
         show("working");
         target = 1.2;
@@ -426,6 +465,7 @@
         } catch (e) {
           $("working-title").textContent = "The update didn't finish";
           $("working-body").textContent = String(e);
+          $("work-retry").hidden = false;
           target = 0.2;
         }
       }

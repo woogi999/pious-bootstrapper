@@ -6,6 +6,58 @@ section below as the release notes, and Pious shows it after updating.
 Write each version as a `## <version>` heading followed by the changes,
 newest version first.
 
+## 1.0.1
+
+### Fixed
+- **Recording lag.** On AMD graphics every frame was copied off the graphics card, converted and copied back, which used more than a whole processor core and still dropped to about 43 of 60 frames a second. The whole screen is now captured with AMD's own capture straight into AMD's encoder: a steady 60 FPS at a quarter of the processor time. If AMD's capture can't start, Pious quietly falls back to the old way.
+- **FFmpeg is built in.** No more downloading FFmpeg for recording: it's inside `pious.exe` and unpacked on first use.
+- **Game pictures and other images** didn't load after moving to the new data folder. Pious now notices missing pictures and downloads them again by itself.
+- **The Macros page was a white screen.** Plugin pages couldn't load their own files. Fixed, and plugins' background engines no longer start twice.
+- **Multi-instance** only worked when Pious started before any Roblox window. It now works however Roblox was started (from Pious, another launcher or the website): Pious lets go of Roblox's one-window lock inside clients that already hold it.
+- **Plugins look like Pious again**: the Macros page uses Pious's own styles and icons, exactly as before it became a plugin.
+- **Tweaks:** when they're off, every tweak is greyed out (some weren't), and the long notice is gone.
+- **Tweaks that didn't show up:** games started from roblox.com never got tweaks, and builds another Roblox window was using were skipped. Tweaks now apply to every launch, and to every installed Roblox version as soon as you change them. Replaced files are read-only so Roblox can't swap its own back. The Roblox icon now changes on the taskbar too, not only the title bar, and on every Roblox window.
+- **Tweaks:** turning them off now undoes everything: files in Roblox, the frame rate and graphics quality in Roblox's settings file, Windows compatibility settings, and the title, icon and priority of open Roblox windows. New **Reset to default**. Tweaks are on by default, with every tweak at Roblox's normal value, so nothing changes until you change something.
+- **AI apps no longer start Pious.** Opening Claude Code, Cursor and other AI apps started Pious in the background every time. Now nothing starts it unless you turn on **Start Pious when an AI app needs it**, and the apps connect at once while Pious is closed.
+- **Notifications:** "Try one" could leave pop-ups, or Pious, stuck. Pop-up windows are made safely now, and a failure is shown instead of swallowed.
+- **Emoji shortcodes in Roblox:** emoji came out blank (they were typed in two halves), and finishing a `:shortcode:` could erase the wrong character. Both fixed; Roblox's own shortcodes no longer get in the way.
+- **Overlays** (game overlay, recording notices, input overlay, emoji list) could fail to appear or show empty. Fixed at the root: how their windows are made and when they're told to show.
+- **Discord:** errors from Discord were taken for success, so a status that Discord refused never showed. Pious now checks Discord's answer and falls back when your Discord is older.
+- **Damaged settings** no longer reset everything: whatever still reads is kept, and Pious says what was reset.
+
+### New
+- **Game search**: Add Game searches Roblox as you type, with icons, players and ratings. No more copying links from the website.
+- **Game stats overlay**: FPS, the server's ping, players and frame rate, server location, time played, Roblox's CPU and memory, and a clock, drawn over the game (Settings → Overlay).
+- **Graphics card** for Roblox: let Windows decide, power saving, high performance, or a specific GPU, like Windows' own Graphics settings.
+- **Render quality with 21 levels**, Roblox's old hidden quality setting: lower than the slider's lowest and higher than its highest.
+- **Anti-aliasing off (×0)**.
+- **Custom skies**: seven presets or your own six pictures.
+- **Pause voxelizer** (renamed from Simpler lighting) and **Roblox priority** now sit together in Tweaks → Performance.
+- **Discord: show as Roblox or Pious.** Your game status comes from a "Roblox" app by default (with Roblox's logo), or from Pious's. Pious also registers itself with Windows and Discord when it starts.
+- **Plugin UI kit**: plugin pages can use Pious's own stylesheet, components and icons (Help → Plugin UI kit).
+- **Ban-risk warnings** on multi-instance (it asks first) and on Macros and the auto-clicker.
+- **Terms and Privacy**: bans and third-party plugins are your own responsibility; be careful which plugins you install.
+- **Pious Setup runs as administrator**, so it can always close Pious and Roblox and replace their files. Pious itself still runs as you.
+- **Plugins** can bring Roblox files (death sounds, cursors, shift lock cursors, any sound or texture), themes, styles, icons and sounds, run an engine in the background, and (with full access) change anything in Pious. **Macros is entirely a plugin now**: its engine, page and your macros live in `plugins\macros`; Pious only gives it capabilities (input, hotkeys, timing, storage).
+- **More cursors**: Bibata Modern Ice, Clean, Dot, FPS, Stoofs, tiny and white dots (from Voidstrap), black-and-white dot and purple cross (from Froststrap), with pictures to pick from.
+- **Themes** and much more appearance: gradients, a second accent, any installed font, roundness, text size. Two themes come with Pious.
+- **Help** inside Pious: installing, tweaks, themes, plugins, troubleshooting, the Privacy Policy and Terms of Service.
+- **Region** for public servers: automatic, best ping, or a region.
+- **Rich notifications**: a game's banner when a friend starts playing, chat-style messages.
+- **Taskbar**: flash, an unread badge and download progress.
+- **Keep Roblox up to date** in the background.
+- **Crash reports** for Pious and Roblox, kept on your PC.
+- **Auto arrange** Roblox windows across your screens.
+- **No grass** performance tweak.
+
+### Faster
+- Recording starts at once (working encoders are remembered and checked in parallel), saves in about half the time for long videos, and FFmpeg runs below the game's priority. **MOV** is the default format.
+- Pious does less in the background while you play.
+
+### Installing
+- One installer for every release: it downloads the newest Pious from GitHub. Pious is installed as plain files, and keeps your data in its install folder (moved over from `%LOCALAPPDATA%\Pious\Bootstrapper` by itself, nothing deleted).
+- Releases no longer include a separate `ffmpeg.zip`; updating removes the old `ffmpeg.exe`.
+
 ## 1.0.0
 
 The first release of Pious.

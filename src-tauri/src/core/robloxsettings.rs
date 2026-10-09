@@ -185,6 +185,12 @@ fn read(xml: &str, kind: Kind, name: &str) -> Option<String> {
     Some(xml[start..end].to_owned())
 }
 
+/// One value as it is in Roblox's settings file right now.
+pub fn live_value(name: &str, kind: Kind) -> Option<String> {
+    let xml = std::fs::read_to_string(live_file()?).ok()?;
+    read(&xml, kind, name)
+}
+
 /// Sets values straight in Roblox's settings file (the tweaks that live
 /// there, like the frame rate cap), clearing read-only for the moment if
 /// it's set. Roblox reads the file when a game starts.
@@ -211,6 +217,28 @@ pub fn apply_live(values: &[(&str, Kind, String)]) -> Result<(), String> {
         let _ = std::fs::set_permissions(&live, permissions);
     }
     written
+}
+
+/// Takes values out of Roblox's settings file again (ones that weren't
+/// there before a tweak added them), so Roblox goes back to its own.
+pub fn remove_live(values: &[(&str, Kind)]) -> Result<(), String> {
+    let Some(live) = live_file() else { return Ok(()) };
+    let xml = std::fs::read_to_string(&live).map_err(|e| e.to_string())?;
+    let next = values.iter().fold(xml.clone(), |xml, (name, kind)| remove(&xml, *kind, name));
+    if next == xml {
+        return Ok(());
+    }
+    std::fs::write(&live, next).map_err(|e| format!("Couldn't change Roblox's settings ({e})."))
+}
+
+fn remove(xml: &str, kind: Kind, name: &str) -> String {
+    let open = format!("<{} name=\"{name}\">", kind.tag());
+    let close = format!("</{}>", kind.tag());
+    let Some(start) = xml.find(&open) else { return xml.to_owned() };
+    let Some(end) = xml[start..].find(&close).map(|i| start + i + close.len()) else { return xml.to_owned() };
+    // The line it was on goes too.
+    let line_start = xml[..start].rfind('\n').filter(|&i| xml[i + 1..start].trim().is_empty()).unwrap_or(start);
+    format!("{}{}", &xml[..line_start], &xml[end..])
 }
 
 fn write(xml: &str, kind: Kind, name: &str, value: &str) -> String {
@@ -247,6 +275,17 @@ mod tests {
         let xml = write(xml, Kind::Int, "FramerateCap", "240");
         assert_eq!(read(&xml, Kind::Int, "FramerateCap").as_deref(), Some("240"));
         assert_eq!(read(&xml, Kind::Bool, "Fullscreen").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn removes_added_values() {
+        let xml = "<Properties>\n\t\t<bool name=\"Fullscreen\">true</bool>\n\t</Properties>";
+        let added = write(xml, Kind::Int, "FramerateCap", "240");
+        assert!(read(&added, Kind::Int, "FramerateCap").is_some());
+        let back = remove(&added, Kind::Int, "FramerateCap");
+        assert!(read(&back, Kind::Int, "FramerateCap").is_none());
+        assert_eq!(read(&back, Kind::Bool, "Fullscreen").as_deref(), Some("true"));
+        assert_eq!(remove(xml, Kind::Int, "Missing"), xml);
     }
 
     #[test]

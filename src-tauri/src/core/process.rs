@@ -66,8 +66,10 @@ mod imp {
 
     const STILL_ACTIVE: u32 = 259;
 
-    /// Handles to Roblox's singleton names while multi-instance is on.
-    static SINGLETON: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    /// Handles to Roblox's singleton names while multi-instance is on, by
+    /// name (0 = not owned yet).
+    static SINGLETON: Mutex<[usize; 2]> = Mutex::new([0; 2]);
+    const SINGLETON_NAMES: [&str; 2] = ["ROBLOX_singletonEvent", "ROBLOX_singletonMutex"];
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -76,19 +78,21 @@ mod imp {
     /// Roblox lets one client run at a time by creating a named object;
     /// owning the name first lets every new client start on its own.
     /// Current builds use `ROBLOX_singletonEvent`, older ones the mutex.
+    /// Each name is tried again on every call until it's owned: a name a
+    /// running client holds can't be taken until it's let go (see
+    /// `core::singleton`), so this is called again as clients come and go.
     pub fn set_multi_instance(enabled: bool) {
         let mut held = SINGLETON.lock().unwrap_or_else(|e| e.into_inner());
-        if enabled && held.is_empty() {
-            for name in ["ROBLOX_singletonEvent", "ROBLOX_singletonMutex"] {
+        for (slot, name) in held.iter_mut().zip(SINGLETON_NAMES) {
+            if enabled && *slot == 0 {
                 let name = wide(name);
                 let handle = unsafe { CreateMutexW(std::ptr::null(), TRUE, name.as_ptr()) };
                 if !handle.is_null() {
-                    held.push(handle as usize);
+                    *slot = handle as usize;
                 }
-            }
-        } else if !enabled {
-            for handle in held.drain(..) {
-                unsafe { CloseHandle(handle as HANDLE) };
+            } else if !enabled && *slot != 0 {
+                unsafe { CloseHandle(*slot as HANDLE) };
+                *slot = 0;
             }
         }
     }
@@ -341,6 +345,67 @@ mod imp {
         unsafe { SetWindowPlacement(window as HWND, &wp) != 0 }
     }
 
+    /// Moves a process's window to exactly this spot on the screen (screen
+    /// coordinates), un-maximizing it first. For Auto arrange.
+    pub fn move_to(pid: u32, x: i32, y: i32, width: i32, height: i32) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsZoomed, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow};
+        let Some(window) = window_of(pid) else { return false };
+        unsafe {
+            if IsZoomed(window as HWND) != 0 || IsIconic(window as HWND) != 0 {
+                ShowWindow(window as HWND, SW_RESTORE);
+            }
+            SetWindowPos(window as HWND, std::ptr::null_mut(), x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE) != 0
+        }
+    }
+
+    /// Process handles kept open for windows Pious watches, so their exit
+    /// code can still be read once they've closed.
+    static HANDLES: std::sync::Mutex<Option<std::collections::HashMap<u32, isize>>> = std::sync::Mutex::new(None);
+
+    /// Starts keeping a process's exit code (see [`exit_code`]).
+    pub fn keep_exit_code(pid: u32) {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+        if handle.is_null() {
+            return;
+        }
+        if let Ok(mut map) = HANDLES.lock() {
+            if let Some(old) = map.get_or_insert_with(Default::default).insert(pid, handle as isize) {
+                unsafe { CloseHandle(old as _) };
+            }
+        } else {
+            unsafe { CloseHandle(handle) };
+        }
+    }
+
+    /// Lets go of kept handles for processes that aren't `still_watched`
+    /// (windows closed from Pious, or that ended unseen).
+    pub fn prune_exit_codes(still_watched: &[u32]) {
+        let Ok(mut map) = HANDLES.lock() else { return };
+        let Some(map) = map.as_mut() else { return };
+        map.retain(|pid, handle| {
+            let keep = still_watched.contains(pid);
+            if !keep {
+                unsafe { CloseHandle(*handle as _) };
+            }
+            keep
+        });
+    }
+
+    /// How a watched process ended (its exit code), once it has; the handle
+    /// is let go then. `None` while it runs or if it wasn't watched.
+    pub fn exit_code(pid: u32) -> Option<u32> {
+        let mut map = HANDLES.lock().ok()?;
+        let handle = *map.as_ref()?.get(&pid)?;
+        let mut code = 0u32;
+        let ok = unsafe { GetExitCodeProcess(handle as _, &mut code) } != 0;
+        if !ok || code == STILL_ACTIVE {
+            return None;
+        }
+        map.as_mut()?.remove(&pid);
+        unsafe { CloseHandle(handle as _) };
+        Some(code)
+    }
+
     /// Renames a process's window. Gives up after half a second if the
     /// window doesn't answer, instead of waiting forever like
     /// `SetWindowTextW` does.
@@ -508,6 +573,14 @@ mod imp {
         false
     }
     pub fn set_title(_pid: u32, _title: &str) {}
+    pub fn move_to(_pid: u32, _x: i32, _y: i32, _w: i32, _h: i32) -> bool {
+        false
+    }
+    pub fn keep_exit_code(_pid: u32) {}
+    pub fn prune_exit_codes(_still_watched: &[u32]) {}
+    pub fn exit_code(_pid: u32) -> Option<u32> {
+        None
+    }
     pub fn is_hung(_hwnd: isize) -> bool {
         false
     }

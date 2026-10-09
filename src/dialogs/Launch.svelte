@@ -20,6 +20,10 @@
   let version = $state<VersionChoice>(initial.version);
   let server = $state<ServerChoice>(initial.server);
   let remember = $state(false);
+  // Where a public server is joined (only for public servers).
+  let region = $state(app.snap!.bootstrapper.preferences.region);
+  let regions = $state<[string, string][]>([]);
+  run<[string, string][]>("regions").then((r) => (regions = r ?? []));
   const edit = initial.mode === "edit";
 
   const current = $derived(snap.bootstrapper.games.find((g) => g.id === game));
@@ -74,7 +78,7 @@
     if (edit) {
       run("set_launch_config", { game, account, version, server });
     } else {
-      launch({ game, account, version, server, remember, pin_account: remember });
+      launch({ game, account, version, server, remember, pin_account: remember, region: server === "Public" ? region : null });
     }
   }
 </script>
@@ -94,6 +98,16 @@
   <div class="field"><span class="label">Account</span><Select options={accounts} value={account} onchange={(v) => (account = v)} /></div>
   <div class="field"><span class="label">Roblox version</span><Select options={versions} value={version} onchange={(v) => (version = v)} /></div>
   <div class="field"><span class="label">Server</span><Select options={servers} value={server} onchange={(v) => (server = v)} /></div>
+    {#if server === "Public" && modal.mode === "launch"}
+      <div class="field">
+        <span class="label">Region</span>
+        <Select
+          options={[{ value: "auto", label: "Automatic (Roblox picks)" }, { value: "best_ping", label: "Best ping" }, ...regions.map(([value, label]) => ({ value, label }))]}
+          value={region}
+          onchange={(v) => (region = v)}
+        />
+      </div>
+    {/if}
   {#if missingVersion}
     <div class="notice">
       <Icon name="info" />{typeof version === "object"

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app, sortOf, viewOf } from "../lib/state.svelte";
   import SortSelect from "../components/SortSelect.svelte";
-  import { closeAll } from "../lib/api";
+  import { closeAll, run } from "../lib/api";
   import { plural } from "../lib/format";
   import EmptyState from "../components/EmptyState.svelte";
   import Icon from "../components/Icon.svelte";
@@ -37,7 +37,8 @@
         ]}
       />
       <ViewToggle page="running" />
-      <button class="btn danger" onclick={closeAll}><Icon name="power" />Close all</button>
+      <button class="btn" title="Lay every Roblox window out across your screens (Settings → General → Auto arrange)" onclick={async () => { const n = await run<number>("arrange_windows", { layout: null }); if (n) app.toast("positive", `Arranged ${n} window${n === 1 ? "" : "s"}`); }}><Icon name="squares-2x2" />Arrange</button>
+        <button class="btn danger" onclick={closeAll}><Icon name="power" />Close all</button>
     {/if}
   </div>
   {#if !snap.instances.length}

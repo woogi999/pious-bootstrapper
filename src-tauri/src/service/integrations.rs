@@ -240,7 +240,7 @@ impl Service {
                     .and_then(|i| Some((i.clone(), s.bootstrapper.game(i.game)?.clone())))
             }
         };
-        let (display, join, studio, idle) = {
+        let (display, join, studio, idle, (app_id, fallback_image)) = {
             let s = self.read();
             let p = &s.bootstrapper.preferences;
             // Pious itself, while nothing's being played.
@@ -261,10 +261,13 @@ impl Service {
                     join_url: None,
                     button: Some(("Get Pious".into(), format!("https://github.com/{}", crate::core::updater::REPOSITORY))),
                     small: None,
+                    // Pious's own status is always Pious's.
+                    app_id: discord::APP_ID,
+                    fallback_image: None,
                 }
             });
             let studio = s.studio.clone().filter(|_| p.discord_presence);
-            (p.discord_display, p.discord_join, studio, idle)
+            (p.discord_display, p.discord_join, studio, idle, discord::application(p.discord_app))
         };
         let display = if display == crate::core::model::DiscordDisplay::GameName { 2 } else { 0 };
         let Some((instance, game)) = wanted else {
@@ -284,6 +287,8 @@ impl Service {
                         join_url: None,
                         button: None,
                         small: None,
+                        app_id,
+                        fallback_image,
                     })
                     .or(idle),
             );
@@ -356,6 +361,8 @@ impl Service {
             join_url,
             button: None,
             small,
+            app_id,
+            fallback_image,
         }));
     }
 

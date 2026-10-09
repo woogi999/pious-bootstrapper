@@ -478,6 +478,78 @@ pub async fn public_servers_paged(place_id: u64, pages: usize, token: Option<&st
     Ok(servers)
 }
 
+/// One public server by its job ID, as Roblox's server list reports it
+/// (players, and the server's own average ping and frame rate). Looks
+/// through at most `pages` pages of 100, busiest first; `None` when it isn't
+/// there (a private or reserved server, or too far down a huge game's list).
+pub async fn find_public_server(place_id: u64, job: &str, pages: usize, token: Option<&str>) -> Result<Option<PublicServer>, String> {
+    let mut cursor: Option<String> = None;
+    for _ in 0..pages.max(1) {
+        let mut url = format!("https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder=Desc&limit=100");
+        if let Some(cursor) = &cursor {
+            url.push_str(&format!("&cursor={cursor}"));
+        }
+        let body = server_page(&url, token).await?;
+        let found = body["data"].as_array().into_iter().flatten().find(|s| s["id"].as_str() == Some(job));
+        if let Some(s) = found {
+            return Ok(Some(PublicServer {
+                job: job.to_owned(),
+                playing: s["playing"].as_u64().unwrap_or(0) as u32,
+                max_players: s["maxPlayers"].as_u64().unwrap_or(0) as u32,
+                ping: s["ping"].as_u64().map(|p| p as u32),
+                fps: s["fps"].as_f64().map(|f| f as f32),
+            }));
+        }
+        cursor = body["nextPageCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// What a pop-up shows about a game: its name, icon, banner and how many
+/// are playing. Links are Roblox's CDN (the window may load those).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GameCard {
+    pub name: String,
+    pub icon: Option<String>,
+    pub banner: Option<String>,
+    pub playing: Option<u64>,
+    pub creator: Option<String>,
+}
+
+/// A game's card, by place (cached for the session).
+pub async fn game_card(place_id: u64) -> Result<GameCard, String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<u64, GameCard>>> = Mutex::new(None);
+    if let Some(card) = CACHE.lock().ok().and_then(|c| c.as_ref()?.get(&place_id).cloned()) {
+        return Ok(card);
+    }
+    let universe = get_json(&format!("https://apis.roblox.com/universes/v1/places/{place_id}/universe")).await?;
+    let universe = universe["universeId"].as_u64().ok_or("No such game")?;
+    let urls = [
+        format!("https://games.roblox.com/v1/games?universeIds={universe}"),
+        format!("https://thumbnails.roblox.com/v1/games/icons?universeIds={universe}&returnPolicy=PlaceHolder&size=150x150&format=Png&isCircular=false"),
+        format!("https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={universe}&countPerUniverse=1&defaults=true&size=768x432&format=Png&isCircular=false"),
+    ];
+    let (details, icon, banner) = futures::join!(get_json(&urls[0]), get_json(&urls[1]), get_json(&urls[2]));
+    let details = details?;
+    let game = &details["data"][0];
+    let card = GameCard {
+        name: game["name"].as_str().unwrap_or_default().trim().to_owned(),
+        playing: game["playing"].as_u64(),
+        creator: game["creator"]["name"].as_str().map(str::to_owned),
+        icon: icon.ok().and_then(|v| v["data"][0]["imageUrl"].as_str().map(str::to_owned)),
+        banner: banner.ok().and_then(|v| v["data"][0]["thumbnails"][0]["imageUrl"].as_str().map(str::to_owned)),
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.get_or_insert_with(HashMap::new).insert(place_id, card.clone());
+    }
+    Ok(card)
+}
+
 /// A web address for a game's square icon, for places that show pictures
 /// by link (like Discord).
 pub async fn game_icon_url(universe_id: u64) -> Result<String, String> {
@@ -718,6 +790,101 @@ pub async fn similar_games(universe_id: u64) -> Result<Vec<SuggestedGame>, Strin
         .unwrap_or_default())
 }
 
+/// A game found by name, with its icon (an image URL) when Roblox has one.
+#[derive(Debug, Clone, Serialize)]
+pub struct FoundGame {
+    pub universe_id: u64,
+    pub place_id: u64,
+    pub name: String,
+    pub creator: String,
+    pub description: Option<String>,
+    pub players: u64,
+    pub up_votes: u64,
+    pub down_votes: u64,
+    pub icon: Option<String>,
+}
+
+/// Searches Roblox's experiences by name, like the search box on roblox.com
+/// (no sign-in needed). Sponsored results are left out.
+pub async fn search_games(query: &str) -> Result<Vec<FoundGame>, String> {
+    let url = reqwest::Url::parse_with_params(
+        "https://apis.roblox.com/search-api/omni-search",
+        &[("searchQuery", query.trim()), ("pageType", "all"), ("sessionId", &uuid::Uuid::new_v4().to_string())],
+    )
+    .map_err(|e| e.to_string())?;
+    let body = get_json(url.as_str()).await.map_err(|e| format!("Roblox's search didn't answer ({e})."))?;
+    let mut found: Vec<FoundGame> = parse_search(&body);
+    found.truncate(30);
+    // Icons, all at once.
+    if !found.is_empty() {
+        let ids: Vec<String> = found.iter().map(|g| g.universe_id.to_string()).collect();
+        let icons = get_json(&format!(
+            "https://thumbnails.roblox.com/v1/games/icons?universeIds={}&size=150x150&format=Png&isCircular=false",
+            ids.join(",")
+        ))
+        .await
+        .unwrap_or(Value::Null);
+        for entry in icons["data"].as_array().into_iter().flatten() {
+            let (Some(id), Some(url)) = (entry["targetId"].as_u64(), entry["imageUrl"].as_str()) else { continue };
+            if let Some(game) = found.iter_mut().find(|g| g.universe_id == id) {
+                game.icon = Some(url.to_owned());
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn parse_search(body: &Value) -> Vec<FoundGame> {
+    let mut out: Vec<FoundGame> = Vec::new();
+    for group in body["searchResults"].as_array().into_iter().flatten() {
+        if group["contentGroupType"].as_str() != Some("Game") {
+            continue;
+        }
+        for g in group["contents"].as_array().into_iter().flatten() {
+            if g["isSponsored"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let (Some(universe_id), Some(place_id), Some(name)) = (g["universeId"].as_u64(), g["rootPlaceId"].as_u64(), g["name"].as_str()) else {
+                continue;
+            };
+            if out.iter().any(|f| f.universe_id == universe_id) {
+                continue;
+            }
+            out.push(FoundGame {
+                universe_id,
+                place_id,
+                name: name.trim().to_owned(),
+                creator: g["creatorName"].as_str().unwrap_or_default().to_owned(),
+                description: g["description"].as_str().map(str::trim).filter(|d| !d.is_empty()).map(str::to_owned),
+                players: g["playerCount"].as_u64().unwrap_or(0),
+                up_votes: g["totalUpVotes"].as_u64().unwrap_or(0),
+                down_votes: g["totalDownVotes"].as_u64().unwrap_or(0),
+                icon: None,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod search_tests {
+    #[test]
+    fn reads_search_results() {
+        let body = serde_json::json!({ "searchResults": [
+            { "contentGroupType": "Game", "contents": [
+                { "universeId": 1, "rootPlaceId": 10, "name": " Jailbreak ", "creatorName": "Badimo", "playerCount": 5, "totalUpVotes": 9, "totalDownVotes": 1, "isSponsored": false },
+                { "universeId": 2, "rootPlaceId": 20, "name": "Ad", "isSponsored": true },
+                { "universeId": 1, "rootPlaceId": 10, "name": "Jailbreak" }
+            ]},
+            { "contentGroupType": "User", "contents": [{ "universeId": 3, "rootPlaceId": 30, "name": "Not a game" }] }
+        ]});
+        let found = super::parse_search(&body);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Jailbreak");
+        assert_eq!(found[0].place_id, 10);
+    }
+}
+
 /// The experiences an account recently played on Roblox (from its home
 /// feed's "Continue" row). Best effort: returns an empty list when Roblox's
 /// response doesn't have the expected shape.
@@ -758,6 +925,21 @@ pub async fn recently_played(token: &str) -> Result<Vec<(u64, String)>, String> 
         }
     }
     Ok(played)
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// Downloads real pictures from Roblox (needs the internet):
+    /// `cargo test pictures_download -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn pictures_download() {
+        let avatar = super::fetch_avatar(1).await;
+        println!("avatar: {:?}", avatar.as_ref().map(Vec::len));
+        let game = super::fetch_game_artwork(3508322461).await;
+        println!("game: {:?}", game.as_ref().map(Vec::len));
+        assert!(avatar.is_ok() && game.is_ok());
+    }
 }
 
 pub(crate) fn http() -> &'static Client {

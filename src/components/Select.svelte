@@ -11,12 +11,14 @@
     onchange,
     placeholder = "Choose…",
     width = "100%",
+    disabled = false,
   }: {
     options: { value: T; label: string }[];
     value: T;
     onchange: (value: T) => void;
     placeholder?: string;
     width?: string;
+    disabled?: boolean;
   } = $props();
 
   let open = $state(false);
@@ -56,7 +58,7 @@
 
 <svelte:window onkeydowncapture={key} />
 
-<button bind:this={field} class="dropdown input" class:open style="width: {width}" onclick={toggle} type="button">
+<button bind:this={field} class="dropdown input" class:open style="width: {width}" onclick={toggle} {disabled} type="button">
   <span class="line grow" class:placeholder={!selected}>{selected?.label ?? placeholder}</span>
   <span class="chevron"><Icon name="caret-down" size={13} /></span>
 </button>

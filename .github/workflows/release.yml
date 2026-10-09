@@ -1,0 +1,112 @@
+name: Release
+
+# Pushing a tag like v1.2.3 builds Pious and publishes a GitHub release with:
+#   manifest.json, pious-1.2.3-win-x64.zip, Pious-Setup.exe, pious.exe
+# (FFmpeg is built into pious.exe, so it's fetched before Pious is built.)
+# (scripts/release.ps1 bumps the version, commits and pushes that tag.)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        run: |
+          $toml = Get-Content src-tauri/Cargo.toml -Raw
+          $version = [regex]::Match($toml, '(?m)^version = "([^"]+)"').Groups[1].Value
+          if (-not $version) { throw "No version in src-tauri/Cargo.toml." }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME doesn't match src-tauri/Cargo.toml version $version."
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Releasing Pious $version"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run check
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            installer -> target
+
+      - name: FFmpeg cache key
+        id: month
+        run: '"value=$(Get-Date -Format yyyy-MM)" >> $env:GITHUB_OUTPUT'
+
+      - uses: actions/cache@v4
+        with:
+          path: installer/vendor
+          key: ffmpeg-${{ steps.month.outputs.value }}
+
+      - name: FFmpeg (built into pious.exe)
+        run: ./scripts/get-ffmpeg.ps1
+
+      - name: Build Pious
+        run: npm run tauri build -- --no-bundle
+
+      - name: Build the installer
+        run: cargo build --release --manifest-path installer/Cargo.toml
+
+      - name: Package the release files
+        run: >
+          ./scripts/package-release.ps1
+          -Version '${{ steps.version.outputs.value }}'
+          -App src-tauri/target/release/pious.exe
+          -Setup installer/target/release/pious-setup.exe
+          -Out release
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          $version = '${{ steps.version.outputs.value }}'
+          $inside = $false
+          $notes = foreach ($line in [IO.File]::ReadAllLines("CHANGELOG.md")) {
+            if ($line -match '^##\s+(\S+)\s*$') {
+              if ($inside) { break }
+              $inside = $Matches[1] -eq $version
+              continue
+            }
+            if ($inside) { $line }
+          }
+          $text = ($notes -join "`n").Trim()
+          if (-not $text -or $text -eq '-') { throw "CHANGELOG.md has no notes under '## $version'." }
+          [IO.File]::WriteAllText("release/notes.md", $text)
+          Write-Host $text
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: Pious ${{ steps.version.outputs.value }}
+          body_path: release/notes.md
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            release/manifest.json
+            release/pious-${{ steps.version.outputs.value }}-win-x64.zip
+            release/Pious-Setup.exe
+            release/pious.exe
